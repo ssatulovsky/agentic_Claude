@@ -1,0 +1,38 @@
+{
+  "name": "erp-agentico",
+  "version": "0.1.0",
+  "description": "ERP Agéntico multiempresa para Chile — núcleo transaccional con agentes de IA supervisados",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "build": "tsc -p tsconfig.build.json",
+    "dev": "tsx watch src/index.ts",
+    "start": "node dist/src/index.js",
+    "db:migrar": "tsx src/db/migrar.ts",
+    "cli:crear-cliente-erp": "tsx src/cli/crearClienteErp.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cli:verificar-bitacora": "tsx src/cli/verificarBitacora.ts"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@fastify/cookie": "^11.1.5",
+    "@fastify/rate-limit": "^11.2.1",
+    "@node-rs/argon2": "^2.2.2",
+    "fastify": "^5.12.7",
+    "kysely": "^0.29.7",
+    "pg": "^8.23.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.5",
+    "@types/pg": "^8.23.1",
+    "tsx": "^4.23.15",
+    "typescript": "5.8",
+    "vitest": "^5.0.5"
+  },
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  }
+}
