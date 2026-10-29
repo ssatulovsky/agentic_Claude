@@ -261,7 +261,7 @@ export async function resolverPropuesta(
     }
     const entrada = herramienta.entrada.parse(propuesta.entrada);
     const resultado = await ejecutarAislado(trx, () =>
-      herramienta.ejecutar({ trx, seguridad: ctx, agenteCodigo: propuesta.agente_codigo, fecha: hoy() }, entrada),
+      herramienta.ejecutar({ trx, seguridad: ctx, agenteCodigo: propuesta.agente_codigo, fecha: hoy(), propuestaId }, entrada),
     );
     if (!resultado.ok) {
       await marcar('FALLIDA', { error: resultado.error.codigo }, resultado.error.message);

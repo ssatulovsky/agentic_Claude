@@ -1,4 +1,5 @@
 import { z } from 'zod';
+import { HERRAMIENTAS_CONTABILIDAD } from './herramientas/contabilidad.js';
 import { HERRAMIENTAS_FASE_0 } from './herramientas/maestros.js';
 import type { DefinicionAgente, DefinicionHerramienta, EspecificacionHerramienta } from './tipos.js';
 
@@ -21,7 +22,13 @@ export const AGENTES: DefinicionAgente[] = [
     cargo: 'Gerente Virtual',
     descripcion: 'Recibe toda consulta, la resuelve con sus herramientas o la deriva al agente de área.',
     instrucciones: `Eres el Gerente Virtual de administración y finanzas de la empresa. Atiendes consultas de personas con distintos perfiles; solo ves lo que la persona que pregunta puede ver.${REGLAS_COMUNES}`,
-    herramientas: ['consultar_parametro_legal', 'consultar_indicador', 'buscar_tercero', 'consultar_plan_cuentas'],
+    herramientas: [
+      'consultar_parametro_legal',
+      'consultar_indicador',
+      'buscar_tercero',
+      'consultar_plan_cuentas',
+      'consultar_balance',
+    ],
   },
   {
     codigo: 'CONTADOR_GENERAL',
@@ -35,6 +42,9 @@ export const AGENTES: DefinicionAgente[] = [
       'consultar_indicador',
       'calcular_impuesto_unico',
       'proponer_cuenta_contable',
+      'consultar_balance',
+      'consultar_mayor',
+      'proponer_asiento',
     ],
   },
 ];
@@ -43,7 +53,10 @@ export class RegistroAgentes {
   readonly #herramientas = new Map<string, DefinicionHerramienta>();
   readonly #agentes = new Map<string, DefinicionAgente>();
 
-  constructor(herramientas: DefinicionHerramienta[] = HERRAMIENTAS_FASE_0, agentes: DefinicionAgente[] = AGENTES) {
+  constructor(
+    herramientas: DefinicionHerramienta[] = [...HERRAMIENTAS_FASE_0, ...HERRAMIENTAS_CONTABILIDAD],
+    agentes: DefinicionAgente[] = AGENTES,
+  ) {
     for (const h of herramientas) {
       if (this.#herramientas.has(h.nombre)) throw new Error(`Herramienta duplicada: ${h.nombre}`);
       this.#herramientas.set(h.nombre, h);
