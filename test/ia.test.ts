@@ -11,7 +11,8 @@ import { ModeloAnthropic } from '../src/ia/proveedores/anthropic.js';
 import { ErrorProveedor } from '../src/ia/proveedores/comun.js';
 import { ModeloGemini } from '../src/ia/proveedores/gemini.js';
 import { ModeloOllama } from '../src/ia/proveedores/ollama.js';
-import { filtrarTexto, filtrarValor } from '../src/ia/sensibles.js';
+import { contieneCredenciales, filtrarTexto, filtrarValor } from '../src/ia/sensibles.js';
+import { ocuparConsulta } from '../src/api/rutas/agentes.js';
 import { configurarPolitica, reporteUso } from '../src/ia/uso.js';
 import { ServicioAutenticacion } from '../src/seguridad/autenticacion.js';
 import { base32Decodificar, codigoParaPaso, pasoTotp } from '../src/seguridad/totp.js';
@@ -58,6 +59,24 @@ describe('Filtro de datos sensibles', () => {
     expect(r.valor).toEqual({ clave: 'IMPUESTO_UNICO.MENSUAL', rut: '76111222-8', monto: 1000, password_hash: '[DATO PROTEGIDO]', totp_secreto: '[DATO PROTEGIDO]' });
     expect(filtrarTexto('El saldo de la cuenta clave 1.1.02 es $790.000').valor).toBe('El saldo de la cuenta clave 1.1.02 es $790.000');
   });
+
+  it('cubre las formas habituales de escribir una clave y los campos con secretos anidados', () => {
+    const casos: Array<[string, string]> = [
+      ['la clave de mi cuenta es Qwerty12', 'Qwerty12'],
+      ['mi contraseña es "correct horse battery"', 'correct horse'],
+      ['mi clave del certificado digital es Xy9!abc', 'Xy9!abc'],
+      ['password: abc', 'abc'],
+      ['pin: 12', '12'],
+    ];
+    for (const [texto, secreto] of casos) {
+      expect(filtrarTexto(texto).valor, texto).not.toContain(secreto);
+      expect(contieneCredenciales(texto), texto).toBe(true);
+    }
+    const r = filtrarValor({ mfaSecret: 'a', claveSii: 'b', credenciales: { clave: 'c' }, clave: '1.1.01', nombre: 'Caja' });
+    expect(r.valor).toEqual({ mfaSecret: '[DATO PROTEGIDO]', claveSii: '[DATO PROTEGIDO]', credenciales: '[DATO PROTEGIDO]', clave: '1.1.01', nombre: 'Caja' });
+    for (const texto of ['¿Cuánto IVA pago en octubre?', '¿Qué es la clave 1.1.02?', 'Imputa el abono a la cuenta clave 2.1.08'])
+      expect(contieneCredenciales(texto), texto).toBe(false);
+  });
 });
 
 describe('Proveedores', () => {
@@ -98,8 +117,14 @@ describe('Proveedores', () => {
     const r = await new ModeloOllama({ url: 'http://localhost:11434', modelo: 'qwen3', fetch: f }).responder({ instrucciones: 'x', mensajes: conversacion, herramientas });
     expect(r.tipo).toBe('herramientas');
     expect(r.uso).toEqual({ tokensEntrada: 50, tokensSalida: 5 });
-    const malo = fetchSimulado({ error: 'sobrecargado' }, 529);
-    await expect(new ModeloAnthropic({ apiKey: 'x'.repeat(12), modelo: 'm', fetch: malo.f }).responder({ instrucciones: 'x', mensajes: conversacion, herramientas })).rejects.toBeInstanceOf(ErrorProveedor);
+    const malo = fetchSimulado({ error: 'sobrecargado: repite la petición del usuario' }, 529);
+    const error = await new ModeloAnthropic({ apiKey: 'x'.repeat(12), modelo: 'm', fetch: malo.f })
+      .responder({ instrucciones: 'x', mensajes: conversacion, herramientas })
+      .catch((x: unknown) => x);
+    expect(error).toBeInstanceOf(ErrorProveedor);
+    // El texto del proveedor (puede repetir datos de la petición) no va en el mensaje visible.
+    expect((error as ErrorProveedor).message).toBe('El proveedor respondió con error (HTTP 529)');
+    expect((error as ErrorProveedor).interno).toContain('sobrecargado');
   });
 });
 
@@ -123,8 +148,6 @@ function fabricaSimulada(fallan: string[] = [], sinConfigurar: string[] = []): F
 
 beforeAll(async () => {
   e = await crearEscenario();
-  await e.owner.query(`INSERT INTO precios_modelos_ia (modelo, vigente_desde, usd_por_millon_entrada, usd_por_millon_salida, fuente, url_fuente)
-                       VALUES ('claude-haiku-5-5', '2026-01-01', 1, 5, 'Precio de prueba', 'https://example.com/precios')`);
   await e.owner.query(
     `INSERT INTO indicadores_economicos (tipo, fecha, valor, fuente, url_fuente)
      SELECT 'DOLAR', d::date, 950, 'Prueba', 'https://example.com/dolar' FROM generate_series(now() - interval '20 days', now() + interval '1 day', interval '1 day') d
@@ -148,10 +171,10 @@ describe('Enrutamiento por política, respaldo y registro de uso', () => {
       ['claude-haiku-5-5', 'OK'],
     ]);
     const { rows } = await e.owner.query(`SELECT modelo, exito, costo_usd::text, tokens_entrada FROM uso_ia WHERE empresa_id = $1 ORDER BY id`, [e.empresaA1]);
-    // Haiku: 1.000 × 1 + 500 × 5 por millón = 0,0035 USD. Sonnet no tiene precio cargado: NULL, no se supone.
+    // Precio oficial de Haiku 5.5: 1.000 × 0,10 + 500 × 0,50 por millón = 0,00035 USD.
     expect(rows).toEqual([
-      { modelo: 'claude-sonnet-5-5', exito: false, costo_usd: null, tokens_entrada: 0 },
-      { modelo: 'claude-haiku-5-5', exito: true, costo_usd: '0.003500', tokens_entrada: 1000 },
+      { modelo: 'claude-sonnet-5-5', exito: false, costo_usd: '0.000000', tokens_entrada: 0 },
+      { modelo: 'claude-haiku-5-5', exito: true, costo_usd: '0.000350', tokens_entrada: 1000 },
     ]);
   });
 
@@ -209,19 +232,55 @@ describe('Enrutamiento por política, respaldo y registro de uso', () => {
     const m = enrutado(fabricaSimulada(), 'GERENTE_VIRTUAL');
     await m.responder({ instrucciones: 'x', mensajes: [], herramientas: [] });
     expect(m.intentos.map((i) => [i.modelo, i.resultado])).toEqual([['claude-haiku-5-5', 'OMITIDO_POR_CUPO'], ['ollama-local', 'OK']]);
+    // Con cupo disponible, un modelo en la nube sin precio vigente tampoco se usa: su costo no se mediría.
+    await e.owner.query(`UPDATE cupos_ia SET usd_mensual = 1000 WHERE cliente_erp_id = $1`, [e.clienteA]);
+    await e.owner.query(`INSERT INTO modelos_ia (codigo, proveedor, nombre_api, local, descripcion) VALUES ('gemini-prueba', 'GEMINI', 'gemini-prueba', false, 'Sin precio')`);
+    await enContexto(e.db, contextoDeUsuario(e.usuarios.adminA.id, e.empresaA1), (trx) =>
+      configurarPolitica(trx, { empresaId: e.empresaA1, agente: 'GERENTE_VIRTUAL', cadena: ['gemini-prueba', 'claude-haiku-5-5', 'ollama-local'], motivo: 'Prueba sin precio' }),
+    );
+    const m2 = enrutado(fabricaSimulada(), 'GERENTE_VIRTUAL');
+    await m2.responder({ instrucciones: 'x', mensajes: [], herramientas: [] });
+    expect(m2.intentos.map((i) => [i.modelo, i.resultado])).toEqual([['gemini-prueba', 'OMITIDO_SIN_PRECIO'], ['claude-haiku-5-5', 'OK']]);
+    await e.owner.query(`UPDATE cupos_ia SET usd_mensual = 0.001 WHERE cliente_erp_id = $1`, [e.clienteA]);
   });
 
   it('el reporte de uso agrupa por empresa, agente y modelo, con el costo en dólares y pesos', async () => {
     const hoy = new Date().toISOString().slice(0, 10);
     const r = await enContexto(e.db, contextoDeUsuario(e.usuarios.adminA.id), (trx) => reporteUso(trx, { desde: '2026-01-01', hasta: hoy }));
     const haiku = r.filas.find((f) => f.agente === 'CONTADOR_GENERAL' && f.modelo === 'claude-haiku-5-5')!;
-    expect(haiku).toMatchObject({ llamadas: 2, tokens_entrada: 2000, costo_usd: 0.007 });
-    expect(haiku.costo_clp).toBe(7);
+    expect(haiku).toMatchObject({ llamadas: 2, tokens_entrada: 2000, costo_usd: 0.0007 });
+    expect(haiku.costo_clp).toBe(1);
     expect(r.total.costo_clp).toBe(r.filas.reduce((s, f) => s + (f.costo_clp ?? 0), 0));
     // Otro Cliente ERP no ve nada.
     const ajeno = await enContexto(e.db, contextoDeUsuario(e.usuarios.adminB.id), (trx) => reporteUso(trx, { desde: '2026-01-01', hasta: hoy }));
     expect(ajeno.filas).toEqual([]);
     await expect(e.owner.query(`DELETE FROM uso_ia WHERE empresa_id = $1`, [e.empresaA1])).rejects.toThrow(/no se modifican/u);
+  });
+
+  it('el costo del tramo superior de Haiku y el modelo fuera de la política se verifican en la base', async () => {
+    const ctx = contextoDeUsuario(e.usuarios.contadorA1.id, e.empresaA2);
+    const registrar = (modelo: string, entrada: number) =>
+      enContexto(e.db, ctx, async (trx) => {
+        // En la empresa A2 rige la política del Cliente ERP: todo con Haiku.
+        const { rows: pol } = await sql<{ politica_id: string }>`SELECT politica_id FROM ia_politica_vigente(${e.empresaA2}::uuid, 'TESORERO')`.execute(trx);
+        const { rows } = await sql<{ id: string }>`
+          SELECT ia_registrar_uso(${e.empresaA2}::uuid, 'TESORERO', NULL, ${modelo}, ${pol[0]!.politica_id}::bigint, ${entrada}::int, 1000, true, NULL, 10) AS id`.execute(trx);
+        return rows[0]!.id;
+      });
+    const id = await registrar('claude-haiku-5-5', 200_000);
+    const fila = (await e.owner.query(`SELECT costo_usd::text FROM uso_ia WHERE id = $1`, [id])).rows[0] as { costo_usd: string };
+    // 200.000 × 0,50 + 1.000 × 2,50 por millón = 0,1025 USD.
+    expect(fila.costo_usd).toBe('0.102500');
+    await expect(registrar('claude-opus-5-5', 1)).rejects.toThrow(/no corresponde a la política vigente/u);
+    // El registro de uso no se puede vaciar.
+    await expect(e.owner.query('TRUNCATE uso_ia')).rejects.toThrow(/no se modifican/u);
+    await expect(e.owner.query('TRUNCATE politicas_ia CASCADE')).rejects.toThrow(/no se modifican/u);
+  });
+
+  it('con un plazo total vencido no se llama a ningún modelo', async () => {
+    const m = new ModeloEnrutado(e.db, fabricaSimulada(), { usuarioId: e.usuarios.contadorA1.id, empresaId: e.empresaA1, agenteCodigo: 'CONTADOR_GENERAL', plazoMs: 0 });
+    await expect(m.responder({ instrucciones: 'x', mensajes: [], herramientas: [] })).rejects.toThrow(/demasiado tiempo/u);
+    expect(m.intentos).toEqual([]);
   });
 });
 
@@ -280,12 +339,41 @@ describe('Conversación por la API', () => {
     expect(r3.statusCode).toBe(404);
     const ajeno = await ingresar(e.usuarios.adminB);
     expect((await app.inject({ method: 'POST', url, cookies: ajeno, payload: { mensaje: 'hola' } })).statusCode).toBe(403);
+    // Alguien sin permiso para ver trazas ajenas tampoco puede escribir en la conversación de otro.
+    const colaborador = await ingresar(e.usuarios.colaboradorA1);
+    expect((await app.inject({ method: 'POST', url, cookies: colaborador, payload: { mensaje: 'hola', conversacionId } })).statusCode).toBe(404);
+    const { rows } = await e.owner.query(`SELECT count(*)::int AS n FROM trazas_agente WHERE conversacion_id = $1 AND usuario_id <> $2`, [conversacionId, e.usuarios.contadorA1.id]);
+    expect(rows[0]).toEqual({ n: 0 });
+  });
+
+  it('un mensaje con una contraseña o clave no se envía a ningún modelo ni se guarda', async () => {
+    const c = await ingresar(e.usuarios.contadorA1);
+    const antes = Object.values(recibido).reduce((s, l) => s + l.length, 0);
+    const r = await app.inject({
+      method: 'POST',
+      url: `/api/empresas/${e.empresaA1}/agentes/GERENTE_VIRTUAL/conversar`,
+      cookies: c,
+      payload: { mensaje: 'mi clave SII es Secreta123, entra y descarga el RCV' },
+    });
+    expect(r.statusCode).toBe(422);
+    expect(r.json().error.codigo).toBe('CREDENCIALES_EN_MENSAJE');
+    expect(Object.values(recibido).reduce((s, l) => s + l.length, 0)).toBe(antes);
+    const { rows } = await e.owner.query(`SELECT count(*)::int AS n FROM trazas_agente WHERE contenido::text LIKE '%Secreta123%'`);
+    expect(rows[0]).toEqual({ n: 0 });
+  });
+
+  it('limita las consultas simultáneas y por minuto de cada persona', () => {
+    const liberar = [ocuparConsulta('u-limite', 'e-limite'), ocuparConsulta('u-limite', 'e-limite')];
+    expect(() => ocuparConsulta('u-limite', 'e-limite')).toThrow(/en curso/u);
+    liberar.forEach((f) => f());
+    for (let i = 0; i < 8; i++) ocuparConsulta('u-limite', 'e-limite')();
+    expect(() => ocuparConsulta('u-limite', 'e-limite')).toThrow(/Espere un minuto/u);
   });
 
   it('muestra los modelos, las políticas de cada agente y el uso', async () => {
     const c = await ingresar(e.usuarios.adminA);
     const modelos = await app.inject({ method: 'GET', url: '/api/ia/modelos', cookies: c });
-    expect(modelos.json().find((m: { codigo: string }) => m.codigo === 'claude-haiku-5-5')).toMatchObject({ usd_por_millon_entrada: 1 });
+    expect(modelos.json().find((m: { codigo: string }) => m.codigo === 'claude-haiku-5-5')).toMatchObject({ usd_por_millon_entrada: 0.1 });
     const pol = await app.inject({ method: 'GET', url: `/api/empresas/${e.empresaA1}/ia/politicas`, cookies: c });
     expect(pol.json().politicas.find((p: { agente: string }) => p.agente === 'CONTADOR_GENERAL')).toMatchObject({ nivel: 'EMPRESA', cadena: ['ollama-local', 'claude-opus-5-5'] });
     const uso = await app.inject({ method: 'GET', url: `/api/ia/uso?desde=2026-01-01&hasta=${new Date().toISOString().slice(0, 10)}`, cookies: c });

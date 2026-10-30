@@ -7,6 +7,12 @@
 
 const MARCA = '[DATO PROTEGIDO]';
 
+/** Valor de un secreto: entre comillas (con espacios) o una palabra. */
+const VALOR = String.raw`(?:"[^"\n]{1,200}"|'[^'\n]{1,200}'|“[^”\n]{1,200}”|(?!\[DATO)[^\s"',;]+)`;
+const PALABRA_SECRETA = String.raw`contrase(?:ñ|n)a|password|passwd|pwd|api[_ -]?key|secreto|credencial(?:es)?|clave|pin|token`;
+/** Palabras que nunca son el valor (para "contraseña de la cuenta", "password es …"). */
+const NO_VALOR = String.raw`(?![:=]|(?:es|era|ser[aá]|de|del|la|el|los|las|mi|mis|su|sus|tu|y|o|que|para|por|en|con|nueva|actual)\b)`;
+
 const PATRONES: Array<[RegExp, string]> = [
   // Certificados y claves privadas (PEM).
   [/-----BEGIN [A-Z0-9 ]+-----[\s\S]*?-----END [A-Z0-9 ]+-----/gu, MARCA],
@@ -18,17 +24,37 @@ const PATRONES: Array<[RegExp, string]> = [
   // Hashes de contraseñas y secretos de doble factor.
   [/\$argon2[a-z]*\$[^\s"']+/gu, MARCA],
   [/otpauth:\/\/[^\s"']+/gu, MARCA],
-  // "contraseña: xxx", "clave SII = xxx", "password xxx", "clave tributaria es xxx"…
+  // "la clave de mi cuenta es X", "mi clave del certificado digital es 'a b c'", "pin: 12", "password = x".
+  // ("clave 1.1.02" no se toca: sin "es", ":" ni "=" es un código de cuenta.)
+  [new RegExp(String.raw`\b(${PALABRA_SECRETA})\b([^\n.:=]{0,40}?(?:\s(?:es|era|ser[aá])\s+|\s*[:=]\s*))${VALOR}`, 'giu'), `$1$2${MARCA}`],
+  // "contraseña Xy12", "password abc" (palabra fuerte seguida directamente del valor).
   [
-    /\b(contrase(?:ñ|n)a|clave\s+(?:tributaria|del?\s+sii|sii|secreta|de\s+acceso|del\s+certificado|bancaria)|password|passwd|pwd|api[_ -]?key|secreto)\b(\s*(?:es|:|=)\s*|\s+)(["']?)(?!\[DATO)([^\s"',;]{4,})\3/giu,
+    new RegExp(String.raw`\b(contrase(?:ñ|n)a|password|passwd|pwd|api[_ -]?key|clave\s+(?:tributaria|sii|del\s+sii|secreta|de\s+acceso|bancaria|del\s+certificado))\b(\s+)${NO_VALOR}${VALOR}`, 'giu'),
     `$1$2${MARCA}`,
   ],
-  // "la clave es xxx", "pin: 1234", "token = xxx" (solo con ":" "=" o "es": "clave 1.1.02" es una cuenta).
-  [/\b(clave|pin|token)\b(\s*[:=]\s*|\s+es\s+)(["']?)(?!\[DATO)([^\s"',;]{4,})\3/giu, `$1$2${MARCA}`],
 ];
 
-/** Nombres de campo que siempre contienen secretos (no "clave" a secas: los parámetros legales la usan). */
-const CLAVES_SECRETAS = /^(contrase|password|passwd|secret|totp|api_?key|token|certificado|clave_(sii|tributaria|certificado|secreta|acceso)|.*_hash$)/iu;
+/**
+ * Nombres de campo que contienen secretos, en cualquier parte del nombre (claveSii, mfaSecret,
+ * password_hash…). No "clave" a secas: los parámetros legales y las cuentas la usan.
+ */
+const CLAVES_SECRETAS =
+  /(contrase|password|passwd|secret|totp|mfa|otp|api_?key|apikey|token|certificado|credencial|clave_?(sii|tributaria|certificado|secreta|acceso|privada)|hash$)/iu;
+
+/**
+ * Palabras que delatan la intención de compartir una credencial. Un mensaje de una persona que
+ * las contiene no se envía a ningún modelo (ni local): el filtro de reemplazo es una segunda
+ * barrera, no la principal.
+ */
+const INTENCION_CREDENCIAL = new RegExp(
+  String.raw`\b(contrase(?:ñ|n)a|password|passwd|credenciales?|api[_ -]?key|clave\s+(?:tributaria|sii|del\s+sii|secreta|de\s+acceso|bancaria|del?\s+(?:mi\s+)?(?:banco|cuenta|correo|certificado|internet))|clave\s+única|c[oó]digo\s+(?:de\s+)?(?:verificaci[oó]n|otp|2fa)|pin|token)\b`,
+  'iu',
+);
+
+/** true si el texto de una persona parece incluir una contraseña, clave o certificado. */
+export function contieneCredenciales(texto: string): boolean {
+  return INTENCION_CREDENCIAL.test(texto) || filtrarTexto(texto).reemplazos > 0;
+}
 
 export interface ResultadoFiltro<T> {
   valor: T;
@@ -61,6 +87,11 @@ export function filtrarValor<T>(valor: T): ResultadoFiltro<T> {
       const f = filtrarTexto(v);
       reemplazos += f.reemplazos;
       return f.valor;
+    }
+    // Un objeto o lista bajo un nombre secreto ("credenciales": {…}) se oculta completo.
+    if (clave && CLAVES_SECRETAS.test(clave) && v !== null && typeof v === 'object') {
+      reemplazos++;
+      return MARCA;
     }
     if (Array.isArray(v)) return v.map((x) => recorrer(x));
     if (v && typeof v === 'object') {

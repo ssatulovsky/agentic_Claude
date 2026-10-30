@@ -38,6 +38,7 @@ export class ModeloGemini implements ModeloIA {
     const datos = (await llamarJson('GEMINI', this.opciones.fetch ?? fetch, `${base}/models/${encodeURIComponent(this.opciones.modelo)}:generateContent`, {
       headers: { 'x-goog-api-key': this.opciones.apiKey },
       timeoutMs: this.opciones.timeoutMs ?? 60_000,
+      ...(p.senal ? { senal: p.senal } : {}),
       body: {
         systemInstruction: { parts: [{ text: p.instrucciones }] },
         contents,

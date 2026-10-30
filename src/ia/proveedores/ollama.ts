@@ -25,6 +25,7 @@ export class ModeloOllama implements ModeloIA {
     const datos = (await llamarJson('OLLAMA', this.opciones.fetch ?? fetch, `${this.opciones.url.replace(/\/$/u, '')}/api/chat`, {
       headers: {},
       timeoutMs: this.opciones.timeoutMs ?? 120_000,
+      ...(p.senal ? { senal: p.senal } : {}),
       body: {
         model: this.opciones.modelo,
         stream: false,

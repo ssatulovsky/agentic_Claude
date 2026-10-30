@@ -40,6 +40,8 @@ const esquema = z.object({
   OLLAMA_MODELO: z.string().min(1).optional(),
   /** Tiempo máximo de espera por respuesta de un modelo. */
   IA_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(300_000).default(60_000),
+  // Plazo total de una consulta a un agente (todos los pasos y modelos de respaldo).
+  IA_PLAZO_CONVERSACION_MS: z.coerce.number().int().min(5_000).max(600_000).default(120_000),
 });
 
 export type Configuracion = z.infer<typeof esquema>;

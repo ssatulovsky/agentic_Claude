@@ -96,5 +96,7 @@ export interface ModeloIA {
     instrucciones: string;
     mensajes: MensajeConversacion[];
     herramientas: EspecificacionHerramienta[];
+    /** Corta la llamada si vence el plazo total de la conversación. */
+    senal?: AbortSignal;
   }): Promise<RespuestaModelo>;
 }

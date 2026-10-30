@@ -1,11 +1,15 @@
 import type { EspecificacionHerramienta } from '../../agentes/tipos.js';
 
-/** Error de un proveedor de IA. `reintentable`: conviene probar con el siguiente modelo de la cadena. */
+/**
+ * Error de un proveedor de IA. `message` es apto para mostrar (sin el texto del proveedor, que
+ * puede repetir datos de la petición); `interno` queda solo para los registros del servidor.
+ */
 export class ErrorProveedor extends Error {
   constructor(
     readonly proveedor: string,
     mensaje: string,
     readonly estado?: number,
+    readonly interno?: string,
   ) {
     super(mensaje);
     this.name = 'ErrorProveedor';
@@ -18,7 +22,7 @@ export async function llamarJson(
   proveedor: string,
   hacerFetch: Fetch,
   url: string,
-  init: { headers: Record<string, string>; body: unknown; timeoutMs: number },
+  init: { headers: Record<string, string>; body: unknown; timeoutMs: number; senal?: AbortSignal },
 ): Promise<unknown> {
   let r: Response;
   try {
@@ -26,15 +30,16 @@ export async function llamarJson(
       method: 'POST',
       headers: { 'content-type': 'application/json', ...init.headers },
       body: JSON.stringify(init.body),
-      signal: AbortSignal.timeout(init.timeoutMs),
+      signal: init.senal ? AbortSignal.any([AbortSignal.timeout(init.timeoutMs), init.senal]) : AbortSignal.timeout(init.timeoutMs),
     });
   } catch (e) {
-    throw new ErrorProveedor(proveedor, `No se pudo conectar: ${(e as Error).message}`);
+    const plazo = (e as Error).name === 'TimeoutError' || (e as Error).name === 'AbortError';
+    throw new ErrorProveedor(proveedor, plazo ? 'Tiempo de espera agotado' : 'No se pudo conectar', undefined, (e as Error).message);
   }
   const texto = await r.text();
   if (!r.ok) {
     // El mensaje del proveedor puede ser largo; nunca incluye la clave de API (va en cabeceras).
-    throw new ErrorProveedor(proveedor, `HTTP ${r.status}: ${texto.slice(0, 200)}`, r.status);
+    throw new ErrorProveedor(proveedor, `El proveedor respondió con error (HTTP ${r.status})`, r.status, texto.slice(0, 500));
   }
   try {
     return JSON.parse(texto) as unknown;

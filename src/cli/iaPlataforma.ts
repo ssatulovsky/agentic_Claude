@@ -4,6 +4,7 @@ import pg from 'pg';
  * Administración de la capa de IA (operación de plataforma, rol erp_owner):
  *
  *   npm run cli:ia -- precio <modelo> <desde AAAA-MM-DD> <usd_entrada_por_millon> <usd_salida_por_millon> <fuente> <url_fuente>
+ *        [<umbral_tokens_entrada> <usd_entrada_sobre_umbral> <usd_salida_sobre_umbral>]
  *   npm run cli:ia -- cupo <rut_cliente_erp> <desde AAAA-MM-01> <usd_mensual> <CONTINUAR|SOLO_LOCAL>
  *   npm run cli:ia -- modelo <codigo> <ANTHROPIC|GEMINI|OLLAMA> <nombre_api> <descripcion>
  *
@@ -18,16 +19,18 @@ async function main(): Promise<void> {
   await cliente.connect();
   try {
     await cliente.query('BEGIN');
-    if (accion === 'precio' && a.length === 6) {
+    if (accion === 'precio' && (a.length === 6 || a.length === 9)) {
       const [modelo, desde, entrada, salida, fuente, urlFuente] = a as [string, string, string, string, string, string];
+      const [umbral = null, entradaSobre = null, salidaSobre = null] = a.slice(6);
       await cliente.query(
         `UPDATE precios_modelos_ia SET vigente_hasta = $2 WHERE modelo = $1 AND vigente_hasta IS NULL AND vigente_desde < $2`,
         [modelo, desde],
       );
       await cliente.query(
-        `INSERT INTO precios_modelos_ia (modelo, vigente_desde, usd_por_millon_entrada, usd_por_millon_salida, fuente, url_fuente)
-         VALUES ($1, $2, $3, $4, $5, $6)`,
-        [modelo, desde, entrada, salida, fuente, urlFuente],
+        `INSERT INTO precios_modelos_ia (modelo, vigente_desde, usd_por_millon_entrada, usd_por_millon_salida, fuente, url_fuente,
+           umbral_tokens_entrada, usd_por_millon_entrada_sobre_umbral, usd_por_millon_salida_sobre_umbral)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
+        [modelo, desde, entrada, salida, fuente, urlFuente, umbral, entradaSobre, salidaSobre],
       );
     } else if (accion === 'cupo' && a.length === 4) {
       const [rut, desde, usd, alExceder] = a as [string, string, string, string];

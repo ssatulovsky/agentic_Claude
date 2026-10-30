@@ -107,7 +107,7 @@ export function Asistentes({ empresa }: { empresa: Empresa }) {
           Enviar
         </button>
       </form>
-      <p className="pequeno">No escriba contraseñas ni claves: si lo hace, el sistema las oculta antes de enviarlas a un modelo en la nube.</p>
+      <p className="pequeno">No escriba contraseñas ni claves: los agentes nunca las necesitan y un mensaje que las incluya no se envía.</p>
     </section>
   );
 }

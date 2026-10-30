@@ -59,15 +59,30 @@ CREATE TABLE precios_modelos_ia (
   vigente_hasta            date,
   usd_por_millon_entrada   numeric(12, 4) NOT NULL CHECK (usd_por_millon_entrada >= 0),
   usd_por_millon_salida    numeric(12, 4) NOT NULL CHECK (usd_por_millon_salida >= 0),
+  -- Precio por tramo: si la entrada de una llamada supera el umbral, se usan los precios "sobre umbral".
+  umbral_tokens_entrada    int CHECK (umbral_tokens_entrada > 0),
+  usd_por_millon_entrada_sobre_umbral numeric(12, 4) CHECK (usd_por_millon_entrada_sobre_umbral >= 0),
+  usd_por_millon_salida_sobre_umbral  numeric(12, 4) CHECK (usd_por_millon_salida_sobre_umbral >= 0),
   fuente                   text NOT NULL,
   url_fuente               text NOT NULL CHECK (url_fuente ~ '^https://'),
   cargado_en               timestamptz NOT NULL DEFAULT now(),
   CHECK (vigente_hasta IS NULL OR vigente_hasta > vigente_desde),
+  CHECK ((umbral_tokens_entrada IS NULL) = (usd_por_millon_entrada_sobre_umbral IS NULL)
+     AND (umbral_tokens_entrada IS NULL) = (usd_por_millon_salida_sobre_umbral IS NULL)),
   EXCLUDE USING gist (modelo WITH =, daterange(vigente_desde, vigente_hasta, '[)') WITH &&)
 );
 -- El modelo local no tiene costo por token (el costo del servidor se mide aparte).
 INSERT INTO precios_modelos_ia (modelo, vigente_desde, usd_por_millon_entrada, usd_por_millon_salida, fuente, url_fuente)
 VALUES ('ollama-local', '2020-01-01', 0, 0, 'Modelo local: sin cobro por token', 'https://ollama.com/');
+-- Precios oficiales de Anthropic (US$ por millón de tokens, sin caché ni lotes), consultados
+-- el 2026-10-30 en la página oficial. Haiku 5.5 cobra más cuando la entrada supera 100.000 tokens.
+-- Los cambios posteriores se cargan con `npm run cli:ia -- precio …` (nueva vigencia).
+INSERT INTO precios_modelos_ia (modelo, vigente_desde, usd_por_millon_entrada, usd_por_millon_salida,
+  umbral_tokens_entrada, usd_por_millon_entrada_sobre_umbral, usd_por_millon_salida_sobre_umbral, fuente, url_fuente)
+VALUES
+  ('claude-haiku-5-5',  '2026-10-30', 0.10, 0.50, 100000, 0.50, 2.50, 'Anthropic: precios de la API', 'https://platform.claude.com/docs/en/about-claude/pricing'),
+  ('claude-sonnet-5-5', '2026-10-30', 2,    10,   NULL,   NULL, NULL, 'Anthropic: precios de la API', 'https://platform.claude.com/docs/en/about-claude/pricing'),
+  ('claude-opus-5-5',   '2026-10-30', 4,    20,   NULL,   NULL, NULL, 'Anthropic: precios de la API', 'https://platform.claude.com/docs/en/about-claude/pricing');
 
 -- ---------------------------------------------------------------------------
 -- Políticas por nivel
@@ -142,6 +157,8 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
          OR (p.nivel = 'CLIENTE_ERP' AND p.cliente_erp_id = e.cliente_erp_id)
          OR (p.nivel = 'EMPRESA' AND p.empresa_id = p_empresa))
     AND app_tiene_acceso_empresa(p_empresa)
+    AND (app_tiene_permiso(p_empresa, 'agentes.consultar') OR app_tiene_permiso_cliente('ia.uso.ver')
+         OR app_tiene_permiso_cliente('ia.politicas.editar'))
   ORDER BY CASE p.nivel WHEN 'EMPRESA' THEN 0 WHEN 'CLIENTE_ERP' THEN 1 ELSE 2 END,
            (p.agente_codigo IS NULL)
   LIMIT 1
@@ -214,6 +231,10 @@ CREATE TABLE uso_ia (
 CREATE INDEX uso_ia_cliente_fecha_idx ON uso_ia (cliente_erp_id, creado_en);
 CREATE TRIGGER uso_ia_inmutable BEFORE UPDATE OR DELETE ON uso_ia
   FOR EACH ROW EXECUTE FUNCTION tributario_rechazar_cambios();
+CREATE TRIGGER uso_ia_sin_truncate BEFORE TRUNCATE ON uso_ia
+  FOR EACH STATEMENT EXECUTE FUNCTION tributario_rechazar_cambios();
+CREATE TRIGGER politicas_ia_sin_truncate BEFORE TRUNCATE ON politicas_ia
+  FOR EACH STATEMENT EXECUTE FUNCTION tributario_rechazar_cambios();
 
 CREATE FUNCTION ia_registrar_uso(p_empresa uuid, p_agente text, p_conversacion uuid, p_modelo text, p_politica bigint,
   p_tokens_entrada int, p_tokens_salida int, p_exito boolean, p_error text, p_latencia_ms int)
@@ -224,12 +245,22 @@ DECLARE
   v_precio precios_modelos_ia;
   v_id bigint;
 BEGIN
-  IF app_usuario_id() IS NULL OR p_empresa IS DISTINCT FROM app_empresa_id() OR NOT app_tiene_acceso_empresa(p_empresa) THEN
+  IF app_usuario_id() IS NULL OR p_empresa IS DISTINCT FROM app_empresa_id() OR NOT app_tiene_acceso_empresa(p_empresa)
+     OR NOT app_tiene_permiso(p_empresa, 'agentes.consultar') THEN
     RAISE EXCEPTION 'Sin acceso a la empresa' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  -- El modelo debe ser parte de la política vigente que se informa para esa empresa y agente.
+  IF NOT EXISTS (SELECT 1 FROM ia_politica_vigente(p_empresa, p_agente) v
+                 WHERE v.politica_id = p_politica AND p_modelo = ANY (v.cadena)) THEN
+    RAISE EXCEPTION 'El modelo % no corresponde a la política vigente', p_modelo USING ERRCODE = 'check_violation';
   END IF;
   SELECT cliente_erp_id INTO v_cliente FROM empresas WHERE id = p_empresa;
   SELECT * INTO v_precio FROM precios_modelos_ia
   WHERE modelo = p_modelo AND daterange(vigente_desde, vigente_hasta, '[)') @> contabilidad_hoy();
+  IF v_precio.umbral_tokens_entrada IS NOT NULL AND coalesce(p_tokens_entrada, 0) > v_precio.umbral_tokens_entrada THEN
+    v_precio.usd_por_millon_entrada := v_precio.usd_por_millon_entrada_sobre_umbral;
+    v_precio.usd_por_millon_salida := v_precio.usd_por_millon_salida_sobre_umbral;
+  END IF;
   INSERT INTO uso_ia (cliente_erp_id, empresa_id, usuario_id, agente_codigo, conversacion_id, modelo, politica_id,
     tokens_entrada, tokens_salida, costo_usd, exito, error, latencia_ms)
   VALUES (v_cliente, p_empresa, app_usuario_id(), p_agente, p_conversacion, p_modelo, p_politica,
@@ -247,7 +278,8 @@ $$;
 CREATE FUNCTION ia_estado_cupo(p_empresa uuid)
 RETURNS TABLE (usd_mensual numeric, al_exceder text, usado_usd numeric, excedido boolean)
 LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
-  WITH e AS (SELECT cliente_erp_id FROM empresas WHERE id = p_empresa AND app_tiene_acceso_empresa(p_empresa)),
+  WITH e AS (SELECT cliente_erp_id FROM empresas WHERE id = p_empresa AND app_tiene_acceso_empresa(p_empresa)
+             AND (app_tiene_permiso(p_empresa, 'agentes.consultar') OR app_tiene_permiso_cliente('ia.uso.ver'))),
   c AS (
     SELECT k.* FROM cupos_ia k, e
     WHERE k.cliente_erp_id = e.cliente_erp_id AND k.vigente_desde <= contabilidad_hoy()
@@ -259,6 +291,16 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
       AND x.creado_en >= (date_trunc('month', contabilidad_hoy()::timestamp) AT TIME ZONE 'America/Santiago')
   )
   SELECT c.usd_mensual, c.al_exceder, u.usado, u.usado >= c.usd_mensual FROM c, u
+$$;
+
+-- Una conversación es de quien la inició. Se verifica sin RLS: la persona que pregunta no
+-- ve las trazas ajenas y, con RLS, una conversación ajena parecería vacía.
+CREATE FUNCTION ia_conversacion_ajena(p_empresa uuid, p_conversacion uuid) RETURNS boolean
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT app_usuario_id() IS NULL OR EXISTS (
+    SELECT 1 FROM trazas_agente t
+    WHERE t.conversacion_id = p_conversacion AND t.usuario_id IS DISTINCT FROM app_usuario_id())
+  OR EXISTS (SELECT 1 FROM trazas_agente t WHERE t.conversacion_id = p_conversacion AND t.empresa_id <> p_empresa)
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -285,5 +327,6 @@ GRANT EXECUTE ON FUNCTION
   ia_politica_vigente(uuid, text),
   ia_configurar_politica(uuid, text, text[], text),
   ia_registrar_uso(uuid, text, uuid, text, bigint, int, int, boolean, text, int),
-  ia_estado_cupo(uuid)
+  ia_estado_cupo(uuid),
+  ia_conversacion_ajena(uuid, uuid)
 TO erp_app;

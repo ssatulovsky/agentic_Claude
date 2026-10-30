@@ -35,6 +35,7 @@ export class ModeloAnthropic implements ModeloIA {
     const datos = (await llamarJson('ANTHROPIC', this.opciones.fetch ?? fetch, this.opciones.url ?? 'https://api.anthropic.com/v1/messages', {
       headers: { 'x-api-key': this.opciones.apiKey, 'anthropic-version': '2023-06-01' },
       timeoutMs: this.opciones.timeoutMs ?? 60_000,
+      ...(p.senal ? { senal: p.senal } : {}),
       body: {
         model: this.opciones.modelo,
         max_tokens: this.opciones.maxTokens ?? 2048,
