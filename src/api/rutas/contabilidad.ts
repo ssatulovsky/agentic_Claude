@@ -3,6 +3,8 @@ import { z } from 'zod';
 import {
   cerrarEjercicio,
   cerrarPeriodo,
+  configurarContabilidad,
+  obtenerConfiguracionContable,
   crearEjercicio,
   listarAsientos,
   listarEjercicios,
@@ -47,6 +49,25 @@ export async function rutasContabilidad(app: FastifyInstance, deps: Dependencias
   app.addHook('preHandler', exigirSesion(deps));
   const enEmpresa = <T>(usuarioId: string, empresaId: string, fn: Parameters<typeof enContexto<T>>[2]) =>
     enContexto(deps.db, contextoDeUsuario(usuarioId, empresaId), fn);
+
+  // ---------------- Configuración contable ----------------
+  app.get('/empresas/:empresaId/configuracion-contable', async (req) => {
+    const { empresaId } = validar(paramEmpresa, req.params);
+    return enEmpresa(req.sesion!.usuarioId, empresaId, async (trx) => {
+      await exigirPermiso(trx, empresaId, 'contabilidad.asientos.ver');
+      return obtenerConfiguracionContable(trx, empresaId);
+    });
+  });
+
+  app.put('/empresas/:empresaId/configuracion-contable', async (req) => {
+    const { empresaId } = validar(paramEmpresa, req.params);
+    const { cuentaResultadoEjercicio } = validar(
+      z.object({ cuentaResultadoEjercicio: z.string().regex(/^[0-9]+(\.[0-9]+)*$/u) }),
+      req.body,
+    );
+    await enEmpresa(req.sesion!.usuarioId, empresaId, (trx) => configurarContabilidad(trx, empresaId, cuentaResultadoEjercicio));
+    return { cuentaResultadoEjercicio };
+  });
 
   // ---------------- Ejercicios y períodos ----------------
   app.get('/empresas/:empresaId/ejercicios', async (req) => {

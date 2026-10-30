@@ -169,3 +169,19 @@ export async function listarAsientos(trx: Trx, empresaId: string, desde: string,
     .limit(Math.min(Math.max(limite, 1), 1000))
     .execute();
 }
+
+/** Define la cuenta de patrimonio donde el cierre anual traspasa el resultado del ejercicio. */
+export async function configurarContabilidad(trx: Trx, empresaId: string, cuentaResultadoEjercicio: string): Promise<void> {
+  await sql`SELECT contabilidad_configurar(${empresaId}::uuid, ${cuentaResultadoEjercicio})`.execute(trx);
+}
+
+export async function obtenerConfiguracionContable(trx: Trx, empresaId: string) {
+  return (
+    (await trx
+      .selectFrom('configuracion_contable as cfg')
+      .innerJoin('plan_cuentas as c', 'c.id', 'cfg.cuenta_resultado_ejercicio_id')
+      .select(['c.codigo as cuentaResultadoEjercicio', 'c.nombre as nombreCuenta', 'cfg.actualizado_en'])
+      .where('cfg.empresa_id', '=', empresaId)
+      .executeTakeFirst()) ?? null
+  );
+}
