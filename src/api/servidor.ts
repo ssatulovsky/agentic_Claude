@@ -1,3 +1,6 @@
+import fastifyStatic from '@fastify/static';
+import { existsSync } from 'node:fs';
+import { join } from 'node:path';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
@@ -11,6 +14,7 @@ import { rutasAdministracion } from './rutas/administracion.js';
 import { rutasAgentes } from './rutas/agentes.js';
 import { rutasAutenticacion } from './rutas/autenticacion.js';
 import { rutasContabilidad } from './rutas/contabilidad.js';
+import { rutasParametrizacion } from './rutas/parametrizacion.js';
 import { rutasTesoreria } from './rutas/tesoreria.js';
 import { rutasTributario } from './rutas/tributario.js';
 import { rutasMaestros } from './rutas/maestros.js';
@@ -102,7 +106,13 @@ export async function crearServidor(deps: Dependencias): Promise<FastifyInstance
     reply.header('X-Content-Type-Options', 'nosniff');
     reply.header('X-Frame-Options', 'DENY');
     reply.header('Referrer-Policy', 'no-referrer');
-    reply.header('Content-Security-Policy', "default-src 'none'; frame-ancestors 'none'");
+    // La interfaz web (/app) carga sus propios scripts y estilos; la API no carga nada.
+    reply.header(
+      'Content-Security-Policy',
+      _req.url.startsWith('/app')
+        ? "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+        : "default-src 'none'; frame-ancestors 'none'",
+    );
     reply.header('Cache-Control', 'no-store');
     if (deps.config.NODE_ENV === 'production') {
       reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
@@ -134,6 +144,15 @@ export async function crearServidor(deps: Dependencias): Promise<FastifyInstance
 
   app.get('/api/salud', async () => ({ estado: 'ok' }));
 
+  // Interfaz web compilada (npm run build:web). Si no está compilada, solo se sirve la API.
+  const raizWeb = deps.config.DIRECTORIO_WEB ?? join(process.cwd(), 'dist-web');
+  if (existsSync(join(raizWeb, 'index.html'))) {
+    await app.register(fastifyStatic, { root: raizWeb, prefix: '/app/', index: ['index.html'], wildcard: false, list: false });
+    app.get('/', async (_req, reply) => reply.redirect('/app/'));
+    // Rutas de la aplicación de una sola página: devuelven index.html.
+    app.get('/app/*', async (_req, reply) => reply.type('text/html').sendFile('index.html'));
+  }
+
   await app.register(async (r) => rutasAutenticacion(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasAdministracion(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasMaestros(r, deps), { prefix: '/api' });
@@ -142,6 +161,7 @@ export async function crearServidor(deps: Dependencias): Promise<FastifyInstance
   await app.register(async (r) => rutasContabilidad(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasTributario(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasTesoreria(r, deps), { prefix: '/api' });
+  await app.register(async (r) => rutasParametrizacion(r, deps), { prefix: '/api' });
 
   return app;
 }

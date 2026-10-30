@@ -147,7 +147,8 @@ export async function rutasTesoreria(app: FastifyInstance, deps: Dependencias): 
           rut: rut.optional(),
           texto: z.string().trim().min(3).max(100).optional(),
           sentido: z.enum(['ABONO', 'CARGO', 'AMBOS']),
-          cuentaContable,
+          // Cuenta contable o concepto de imputación (se recomienda el concepto).
+          destino: z.union([cuentaContable, z.string().regex(/^[A-Z_]{3,40}$/u)]),
           tercero: rut.optional(),
           glosa: z.string().trim().min(3).max(300),
         })

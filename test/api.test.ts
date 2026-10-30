@@ -426,6 +426,41 @@ describe('Datos por empresa a través de la API', () => {
     expect(grande.statusCode).toBe(413);
   });
 
+  it('parametrización contable por la API', async () => {
+    const c = { [NOMBRE_COOKIE]: cookieContador };
+    const base = `/api/empresas/${e.empresaA1}`;
+    const carga = await app.inject({ method: 'POST', url: `${base}/plan-cuentas/cargar-base`, cookies: c, headers: { 'x-erp-solicitud': '1' } });
+    expect(carga.statusCode).toBe(200);
+    expect(carga.json().imputaciones_creadas).toBe(23);
+    const lista = await app.inject({ method: 'GET', url: `${base}/imputaciones`, cookies: c });
+    expect(lista.json().find((i: { concepto: string }) => i.concepto === 'RETIROS_SOCIOS').cuenta.codigo).toBe('3.1.02');
+    const malo = await app.inject({ method: 'PUT', url: `${base}/imputaciones/RETIROS_SOCIOS`, cookies: c, payload: { cuenta: '4.1.01', motivo: 'Prueba' } });
+    expect(malo.statusCode).toBe(422);
+    const ok = await app.inject({
+      method: 'PUT',
+      url: `${base}/imputaciones/RETIROS_SOCIOS`,
+      cookies: c,
+      payload: { cuenta: '2.1.09', motivo: 'Cuenta corriente del socio' },
+    });
+    expect(ok.statusCode).toBe(200);
+    const historial = await app.inject({ method: 'GET', url: `${base}/imputaciones/RETIROS_SOCIOS/historial`, cookies: c });
+    expect(historial.json()).toHaveLength(2);
+  });
+
+  it('sirve la interfaz web con su política de contenido, sin relajar la de la API', async () => {
+    const pagina = await app.inject({ method: 'GET', url: '/app/' });
+    if (pagina.statusCode === 404) return; // interfaz no compilada en este entorno
+    expect(pagina.statusCode).toBe(200);
+    expect(pagina.headers['content-type']).toMatch(/text\/html/u);
+    expect(pagina.headers['content-security-policy']).toMatch(/script-src 'self'/u);
+    const ruta = await app.inject({ method: 'GET', url: '/app/parametrizacion' });
+    expect(ruta.statusCode).toBe(200);
+    const salud = await app.inject({ method: 'GET', url: '/api/salud' });
+    expect(salud.headers['content-security-policy']).toBe("default-src 'none'; frame-ancestors 'none'");
+    const fuera = await app.inject({ method: 'GET', url: '/app/..%2f..%2fpackage.json' });
+    expect(fuera.body).not.toContain('"dependencies"');
+  });
+
   it('la cadena de la bitácora sigue íntegra después de todo lo anterior', async () => {
     const { rows } = await e.owner.query<{ alterado: string | null }>('SELECT bitacora_verificar() AS alterado');
     expect(rows[0]!.alterado).toBeNull();
