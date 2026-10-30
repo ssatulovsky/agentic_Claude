@@ -50,6 +50,8 @@ export interface DocumentoRcv {
   iva_fuera_plazo: number;
   /** Crédito de empresa constructora e IVA de terceros. */
   montos_especiales: number;
+  /** Detalle de los montos especiales, por nombre de columna del SII (solo los distintos de cero). */
+  montos_especiales_detalle: Record<string, number>;
   /** IVA no retenido en facturas de compra con retención parcial. */
   iva_no_retenido: number;
   /** Tabacos e "Impto. Sin Derecho a Crédito": sin efecto en el F29. */
@@ -92,6 +94,8 @@ type Campo =
   | 'iva_no_retenido'
   | 'impuestos_sin_credito'
   | 'codigo_otro_impuesto'
+  | 'rut_emisor_liquidacion'
+  | 'receptor_extranjero'
   | 'monto_total'
   | 'indicador_nota_factura_compra'
   | 'ignorar';
@@ -132,8 +136,33 @@ const ALIAS: Record<string, Campo> = {
   'iva retenido total': 'iva_retenido',
   'iva retenido parcial': 'iva_retenido',
   'iva fuera de plazo': 'iva_fuera_plazo',
+  // Montos que el traspaso automático no considera: cada uno se informa en la propuesta
+  // de F29 con el nombre de su columna, para revisión del contador.
   'credito empresa constructora': 'montos_especiales',
   'iva terceros': 'montos_especiales',
+  'iva propio': 'montos_especiales',
+  'iva comision liquid factura': 'montos_especiales',
+  'impto zona franca ley 18211': 'montos_especiales',
+  'garantia dep envases': 'montos_especiales',
+  'venta pasajes transporte nacional': 'montos_especiales',
+  'venta pasajes transporte internacional': 'montos_especiales',
+  // Columnas del libro de ventas sin efecto directo en el F29 (referencias, indicadores,
+  // bases de comisiones de liquidaciones-factura, que ya se advierten por su tipo 43).
+  'neto comision liquid factura': 'montos_especiales',
+  'exento comision liquid factura': 'montos_especiales',
+  // Datos que no son montos pero obligan a revisar el documento (ver más abajo).
+  'rut emisor liquid factura': 'rut_emisor_liquidacion',
+  'num ident receptor extranjero': 'receptor_extranjero',
+  'nacionalidad receptor extranjero': 'receptor_extranjero',
+  'tipo docto referencia': 'ignorar',
+  'folio docto referencia': 'ignorar',
+  // En los archivos reales trae valores 1 y 2 en facturas normales: no significa "sin costo".
+  'indicador venta sin costo': 'ignorar',
+  'indicador servicio periodico': 'ignorar',
+  'monto no facturable': 'ignorar',
+  'total monto periodo': 'ignorar',
+  'numero interno': 'ignorar',
+  'codigo sucursal': 'ignorar',
   // Impuestos sin derecho a crédito para el comprador (se suman; el total los incluye).
   'tabacos puros': 'impuestos_sin_credito',
   'tabacos cigarrillos': 'impuestos_sin_credito',
@@ -291,7 +320,7 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
     });
   }
   for (const [campo, indices] of columnas) {
-    if (indices.length > 1 && !SUMABLES.has(campo)) {
+    if (indices.length > 1 && !SUMABLES.has(campo) && campo !== 'receptor_extranjero') {
       throw new ErrorNegocio('RCV_FORMATO', `La columna ${campo} aparece más de una vez en el archivo.`, 422);
     }
   }
@@ -362,10 +391,12 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
       montos[campo] = Math.abs(m);
     }
     const sumas: Partial<Record<Campo, number>> = {};
+    const detalleEspeciales: Record<string, number> = {};
     for (const campo of SUMABLES) {
       let total = 0;
       for (const idx of columnas.get(campo) ?? []) {
         const m = leerMonto(fila[idx] ?? '');
+        if (campo === 'montos_especiales' && m) detalleEspeciales[encabezado[idx]!.trim()] = Math.abs(m);
         if (m === null) return error(`monto inválido en ${campo} ("${corto(fila[idx] ?? '')}")`);
         total += Math.abs(m);
       }
@@ -384,6 +415,17 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
     const codigoTexto = valor('codigo_iva_no_recuperable');
     const codigoNoRec = codigoTexto === '' ? null : /^\d{1,3}$/u.test(codigoTexto) ? Number(codigoTexto) : NaN;
     if (Number.isNaN(codigoNoRec)) return error(`código de IVA no recuperable inválido ("${corto(codigoTexto)}")`);
+
+    // Documentos que obligan a revisar su traspaso aunque no traigan montos especiales:
+    // se informan en la advertencia del F29 por el monto total del documento.
+    const conDato = (v: string) => v !== '' && v !== '-' && v !== '0';
+    const extranjero = (columnas.get('receptor_extranjero') ?? []).some((idx) => conDato((fila[idx] ?? '').trim()));
+    if (extranjero && ![110, 111, 112].includes(tipo)) {
+      detalleEspeciales['Receptor extranjero (posible exportación de servicios: códigos 585/20)'] = Math.abs(montos.monto_total ?? 0);
+    }
+    if (conDato(valor('rut_emisor_liquidacion')) && tipo !== 43) {
+      detalleEspeciales['Documento asociado a una liquidación-factura'] = Math.abs(montos.monto_total ?? 0);
+    }
 
     const codigoOtroTexto = valor('codigo_otro_impuesto');
     const codigoOtro = codigoOtroTexto === '' || codigoOtroTexto === '0' ? null : /^\d{1,4}$/u.test(codigoOtroTexto) ? Number(codigoOtroTexto) : NaN;
@@ -414,6 +456,7 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
       iva_retenido: sumas.iva_retenido ?? 0,
       iva_fuera_plazo: 0,
       montos_especiales: sumas.montos_especiales ?? 0,
+      montos_especiales_detalle: detalleEspeciales,
       iva_no_retenido: sumas.iva_no_retenido ?? 0,
       impuestos_sin_credito: sumas.impuestos_sin_credito ?? 0,
       codigo_otro_impuesto: codigoOtro,

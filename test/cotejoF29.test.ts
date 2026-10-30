@@ -1,3 +1,4 @@
+import { sql } from 'kysely';
 import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { contextoDeUsuario, enContexto, type Trx } from '../src/db/conexion.js';
@@ -100,12 +101,11 @@ describe('Cotejo con los F29 declarados (julio a septiembre de 2026)', () => {
     await comoContador((trx) => aprobarF29(trx, id, true));
   });
 
-  it('agosto: dos facturas exentas por $7.500.000, PPM al 0,2%', async () => {
-    const ventas = [
-      ENCABEZADO_VENTAS,
-      '1;34;Del Giro;76543210-3;CLIENTE UNO SPA;10;05/08/2026;05/08/2026;;;5000000;0;0;5000000;0;0;0;0;0',
-      '2;34;Del Giro;76111222-8;CLIENTE DOS SPA;11;20/08/2026;20/08/2026;;;2500000;0;0;2500000;0;0;0;0;0',
-    ].join('\n');
+  it('agosto: dos facturas exentas por $7.500.000 (detalle de ventas real del SII), PPM al 0,2%', async () => {
+    const ventas = readFileSync(new URL('./datos/rcv_venta_detalle_sii.csv', import.meta.url), 'utf8');
+    const l = leerRcvCsv(ventas, 'VENTA');
+    expect(l.columnasNoReconocidas).toEqual([]);
+    expect(l.advertencias).toEqual([]);
     await importar('VENTA', 8, ventas);
     await importar('COMPRA', 8, ENCABEZADO_COMPRAS);
     const id = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2026, mes: 8 }));
@@ -123,6 +123,85 @@ describe('Cotejo con los F29 declarados (julio a septiembre de 2026)', () => {
     const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id));
     expect(noCero(f.codigos)).toEqual(DECLARADOS['2026-09']);
     expect(f.codigos['91']).toBe(0);
+  });
+});
+
+describe('Columnas especiales del libro de ventas', () => {
+  const real = readFileSync(new URL('./datos/rcv_venta_detalle_sii.csv', import.meta.url), 'utf8');
+  const [encabezado, primera] = real.split('\n') as [string, string];
+  const columnas = encabezado.split(';');
+  /** Primera fila del archivo real, movida a marzo y con los cambios indicados. */
+  const filaMarzo = (cambios: Record<string, string>) => {
+    const celdas = primera.split(';');
+    const base: Record<string, string> = {
+      'Fecha Docto': '04/03/2026',
+      'Fecha Recepcion': '04/03/2026 20:57:18',
+      'Fecha Acuse Recibo': '',
+      ...cambios,
+    };
+    for (const [col, v] of Object.entries(base)) celdas[columnas.indexOf(col)] = v;
+    return `${encabezado}\n${celdas.join(';')}\n`;
+  };
+
+  it('se guardan por nombre de columna, con receptor extranjero y liquidación-factura, y aparecen en el F29', async () => {
+    const csv = filaMarzo({
+      'Num. Ident. Receptor Extranjero': 'P1234567',
+      'Nacionalidad Receptor Extranjero': '225',
+      'RUT Emisor Liquid. Factura': '76543210-3',
+      'Exento Comision Liquid. Factura': '1234',
+    });
+    const l = leerRcvCsv(csv, 'VENTA');
+    expect(l.documentos[0]!.montos_especiales_detalle).toEqual({
+      'Exento Comision Liquid. Factura': 1234,
+      'Receptor extranjero (posible exportación de servicios: códigos 585/20)': 3_750_000,
+      'Documento asociado a una liquidación-factura': 3_750_000,
+    });
+    await importar('VENTA', 3, csv);
+    await importar('COMPRA', 3, ENCABEZADO_COMPRAS);
+    // Marzo es anterior a la tasa de PPM configurada; se configura una de prueba para ese mes.
+    await comoContador((trx) => configurarTasaPpm(trx, e.empresaA1, '2026-03-01', 0.2, 'Tasa de prueba para marzo'));
+    const id = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2026, mes: 3, remanenteAnterior: 0 }));
+    const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id));
+    const conceptos = (f.advertencias.find((a) => a.tipo === 'DOCUMENTOS_CON_MONTOS_ESPECIALES')?.detalle as { concepto: string }[]).map(
+      (d) => d.concepto,
+    );
+    expect(conceptos.sort()).toEqual([
+      'Columna del RCV "Documento asociado a una liquidación-factura"',
+      'Columna del RCV "Exento Comision Liquid. Factura"',
+      'Columna del RCV "Receptor extranjero (posible exportación de servicios: códigos 585/20)"',
+    ]);
+    // Una exportación con su propio tipo de documento (110) no se advierte por el receptor extranjero.
+    expect(leerRcvCsv(filaMarzo({ 'Tipo Doc': '110', 'Num. Ident. Receptor Extranjero': 'P1' }), 'VENTA').documentos[0]!.montos_especiales_detalle).toEqual({});
+  });
+
+  it('la base de datos rechaza un detalle inválido', async () => {
+    const doc = leerRcvCsv(filaMarzo({}), 'VENTA').documentos[0]!;
+    for (const detalle of [{ x: 'texto' }, { x: -5 }, { x: 1.5 }, { x: 1e13 }, [1]]) {
+      await expect(
+        comoContador((trx) =>
+          sql`SELECT rcv_registrar_importacion(${e.empresaA1}::uuid, 'VENTA', 'REGISTRO', 2026, 2, 'ARCHIVO_SII', 'x.csv',
+                ${'b'.repeat(64)}, ${JSON.stringify([{ ...doc, fecha_documento: '2026-02-04', fecha_recepcion: null, montos_especiales_detalle: detalle }])}::jsonb)`.execute(trx),
+        ),
+      ).rejects.toThrow(/montos inválidos|check constraint/u);
+    }
+  });
+
+  it('los documentos importados antes del detalle se siguen advirtiendo', async () => {
+    const { rows } = await e.owner.query<{ id: string }>(
+      `SELECT id FROM rcv_importaciones WHERE empresa_id = $1 AND periodo = '2026-03-01' AND libro = 'VENTA' AND estado = 'VIGENTE'`,
+      [e.empresaA1],
+    );
+    await e.owner.query(
+      `INSERT INTO rcv_documentos (importacion_id, empresa_id, tipo_documento, tipo_operacion, rut_contraparte, folio, fecha_documento,
+         monto_exento, monto_total, montos_especiales)
+       VALUES ($1, $2, 34, 'DEL_GIRO', '76111222-8', 999, '2026-03-10', 1000, 1000, 77)`,
+      [rows[0]!.id, e.empresaA1],
+    );
+    const id = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2026, mes: 3, remanenteAnterior: 0 }));
+    const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id));
+    expect(f.advertencias.find((a) => a.tipo === 'DOCUMENTOS_CON_MONTOS_ESPECIALES')?.detalle).toEqual(
+      expect.arrayContaining([expect.objectContaining({ concepto: 'Crédito de empresa constructora o IVA de terceros', monto: 77, folios: [999] })]),
+    );
   });
 });
 
