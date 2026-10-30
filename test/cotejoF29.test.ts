@@ -100,12 +100,11 @@ describe('Cotejo con los F29 declarados (julio a septiembre de 2026)', () => {
     await comoContador((trx) => aprobarF29(trx, id, true));
   });
 
-  it('agosto: dos facturas exentas por $7.500.000, PPM al 0,2%', async () => {
-    const ventas = [
-      ENCABEZADO_VENTAS,
-      '1;34;Del Giro;76543210-3;CLIENTE UNO SPA;10;05/08/2026;05/08/2026;;;5000000;0;0;5000000;0;0;0;0;0',
-      '2;34;Del Giro;76111222-8;CLIENTE DOS SPA;11;20/08/2026;20/08/2026;;;2500000;0;0;2500000;0;0;0;0;0',
-    ].join('\n');
+  it('agosto: dos facturas exentas por $7.500.000 (detalle de ventas real del SII), PPM al 0,2%', async () => {
+    const ventas = readFileSync(new URL('./datos/rcv_venta_detalle_sii.csv', import.meta.url), 'utf8');
+    const l = leerRcvCsv(ventas, 'VENTA');
+    expect(l.columnasNoReconocidas).toEqual([]);
+    expect(l.advertencias).toEqual([]);
     await importar('VENTA', 8, ventas);
     await importar('COMPRA', 8, ENCABEZADO_COMPRAS);
     const id = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2026, mes: 8 }));
@@ -123,6 +122,30 @@ describe('Cotejo con los F29 declarados (julio a septiembre de 2026)', () => {
     const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id));
     expect(noCero(f.codigos)).toEqual(DECLARADOS['2026-09']);
     expect(f.codigos['91']).toBe(0);
+  });
+});
+
+describe('Columnas especiales del libro de ventas', () => {
+  it('se guardan por nombre de columna y aparecen en la advertencia del F29', async () => {
+    const real = readFileSync(new URL('./datos/rcv_venta_detalle_sii.csv', import.meta.url), 'utf8');
+    const [encabezado, primera] = real.split('\n');
+    const columnas = encabezado!.split(';');
+    const celdas = primera!.split(';');
+    celdas[columnas.indexOf('IVA propio')] = '1234';
+    celdas[columnas.indexOf('Fecha Docto')] = '04/03/2026';
+    celdas[columnas.indexOf('Fecha Recepcion')] = '04/03/2026 20:57:18';
+    celdas[columnas.indexOf('Fecha Acuse Recibo')] = '';
+    const l = leerRcvCsv(`${encabezado}\n${celdas.join(';')}\n`, 'VENTA');
+    expect(l.documentos[0]).toMatchObject({ montos_especiales: 1234, montos_especiales_detalle: { 'IVA propio': 1234 } });
+    await importar('VENTA', 3, `${encabezado}\n${celdas.join(';')}\n`);
+    await importar('COMPRA', 3, ENCABEZADO_COMPRAS);
+    // Marzo es anterior a la tasa de PPM configurada; se configura una de prueba para ese mes.
+    await comoContador((trx) => configurarTasaPpm(trx, e.empresaA1, '2026-03-01', 0.2, 'Tasa de prueba para marzo'));
+    const id2 = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2026, mes: 3, remanenteAnterior: 0 }));
+    const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id2));
+    expect(f.advertencias.find((a) => a.tipo === 'DOCUMENTOS_CON_MONTOS_ESPECIALES')?.detalle).toEqual([
+      expect.objectContaining({ concepto: 'Columna del RCV "IVA propio"', monto: 1234 }),
+    ]);
   });
 });
 

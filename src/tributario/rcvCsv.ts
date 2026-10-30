@@ -50,6 +50,8 @@ export interface DocumentoRcv {
   iva_fuera_plazo: number;
   /** Crédito de empresa constructora e IVA de terceros. */
   montos_especiales: number;
+  /** Detalle de los montos especiales, por nombre de columna del SII (solo los distintos de cero). */
+  montos_especiales_detalle: Record<string, number>;
   /** IVA no retenido en facturas de compra con retención parcial. */
   iva_no_retenido: number;
   /** Tabacos e "Impto. Sin Derecho a Crédito": sin efecto en el F29. */
@@ -132,8 +134,31 @@ const ALIAS: Record<string, Campo> = {
   'iva retenido total': 'iva_retenido',
   'iva retenido parcial': 'iva_retenido',
   'iva fuera de plazo': 'iva_fuera_plazo',
+  // Montos que el traspaso automático no considera: cada uno se informa en la propuesta
+  // de F29 con el nombre de su columna, para revisión del contador.
   'credito empresa constructora': 'montos_especiales',
   'iva terceros': 'montos_especiales',
+  'iva propio': 'montos_especiales',
+  'iva comision liquid factura': 'montos_especiales',
+  'impto zona franca ley 18211': 'montos_especiales',
+  'garantia dep envases': 'montos_especiales',
+  'venta pasajes transporte nacional': 'montos_especiales',
+  'venta pasajes transporte internacional': 'montos_especiales',
+  // Columnas del libro de ventas sin efecto directo en el F29 (referencias, indicadores,
+  // bases de comisiones de liquidaciones-factura, que ya se advierten por su tipo 43).
+  'rut emisor liquid factura': 'ignorar',
+  'neto comision liquid factura': 'ignorar',
+  'exento comision liquid factura': 'ignorar',
+  'tipo docto referencia': 'ignorar',
+  'folio docto referencia': 'ignorar',
+  'num ident receptor extranjero': 'ignorar',
+  'nacionalidad receptor extranjero': 'ignorar',
+  'indicador venta sin costo': 'ignorar',
+  'indicador servicio periodico': 'ignorar',
+  'monto no facturable': 'ignorar',
+  'total monto periodo': 'ignorar',
+  'numero interno': 'ignorar',
+  'codigo sucursal': 'ignorar',
   // Impuestos sin derecho a crédito para el comprador (se suman; el total los incluye).
   'tabacos puros': 'impuestos_sin_credito',
   'tabacos cigarrillos': 'impuestos_sin_credito',
@@ -362,10 +387,12 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
       montos[campo] = Math.abs(m);
     }
     const sumas: Partial<Record<Campo, number>> = {};
+    const detalleEspeciales: Record<string, number> = {};
     for (const campo of SUMABLES) {
       let total = 0;
       for (const idx of columnas.get(campo) ?? []) {
         const m = leerMonto(fila[idx] ?? '');
+        if (campo === 'montos_especiales' && m) detalleEspeciales[encabezado[idx]!.trim()] = Math.abs(m);
         if (m === null) return error(`monto inválido en ${campo} ("${corto(fila[idx] ?? '')}")`);
         total += Math.abs(m);
       }
@@ -414,6 +441,7 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
       iva_retenido: sumas.iva_retenido ?? 0,
       iva_fuera_plazo: 0,
       montos_especiales: sumas.montos_especiales ?? 0,
+      montos_especiales_detalle: detalleEspeciales,
       iva_no_retenido: sumas.iva_no_retenido ?? 0,
       impuestos_sin_credito: sumas.impuestos_sin_credito ?? 0,
       codigo_otro_impuesto: codigoOtro,
