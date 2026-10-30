@@ -2,7 +2,7 @@
 
 ERP multiempresa para Chile en el que un equipo de agentes de IA atiende la administración y las finanzas, y un núcleo transaccional determinista valida, calcula y registra todo.
 
-> **Estado: Fase 0 (Fundaciones) completa.** Seguridad, datos multiempresa, bitácora inmutable, motor de normativa y marco de agentes. Todavía no hay interfaz web ni contabilidad transaccional (eso llega en la Fase 1). Ver el plan maestro.
+> **Estado:** Fase 0 (Fundaciones) completa. Fase 1 en curso: libro diario, mayor y balance de 8 columnas listos (entrega 1.1). Todavía no hay interfaz web.
 
 ## Principios
 
@@ -36,6 +36,7 @@ src/
   seguridad/               Contraseñas Argon2id, TOTP (RFC 6238), cifrado AES-256-GCM, sesiones, permisos
   bitacora/                Registro y verificación de la cadena
   normativa/               Parámetros legales por fecha, indicadores, impuesto único
+  contabilidad/            Libro diario, mayor y balance de 8 columnas
   agentes/                 Catálogo de agentes, herramientas, ejecutor con permisos, ciclo de conversación
   api/                     API HTTP (Fastify)
   cli/                     Alta de un Cliente ERP
@@ -84,6 +85,7 @@ Cada ejecución crea una base de datos nueva, aplica todas las migraciones y la 
 - **Normativa:** valores por fecha, cálculo del impuesto único verificado contra la tabla del SII de octubre 2026, y rechazo de valores superpuestos.
 - **Agentes:** permisos de la persona, módulos contratados, herramientas por cargo, propuestas con aprobación, trazas completas y tope de pasos.
 - **TOTP:** vectores oficiales del RFC 6238.
+- **Contabilidad:** partida doble exacta, cuentas imputables, tercero y centro de costo obligatorios según la cuenta, correlativo sin saltos aun con registros simultáneos, inmutabilidad, reversas, meses cerrados en orden, reapertura de mes con motivo, cierre del ejercicio, reapertura con dos aprobaciones del Directorio (nunca de quien la pide), balance de 8 columnas cuadrado y mayor con saldo arrastrado.
 
 ## API (Fase 0)
 
@@ -103,11 +105,28 @@ Cada ejecución crea una base de datos nueva, aplica todas las migraciones y la 
 | `GET /api/empresas/:id/normativa/indicadores/:tipo?fecha=` | UF, UTM, UTA |
 | `GET /api/empresas/:id/bitacora` | Auditoría de la empresa |
 | `GET /api/agentes` · `GET /api/empresas/:id/propuestas` · `POST …/propuestas/:id/resolver` | Agentes y aprobaciones |
+| `GET/POST /api/empresas/:id/ejercicios` | Ejercicios contables (crea sus meses) |
+| `POST …/periodos/:id/cerrar` · `POST …/periodos/:id/reabrir` | Cierre mensual y reapertura con motivo |
+| `POST …/ejercicios/:id/cerrar` | Cierre del ejercicio |
+| `POST …/ejercicios/:id/solicitudes-reapertura` · `POST …/solicitudes-reapertura/:id/resolver` | Reapertura de un ejercicio cerrado con autorización del Directorio |
+| `GET/POST /api/empresas/:id/asientos` · `GET …/asientos/:id` · `POST …/asientos/:id/reversar` | Libro diario |
+| `GET /api/empresas/:id/mayor?cuenta=&desde=&hasta=` | Libro mayor |
+| `GET /api/empresas/:id/balance-8-columnas?hasta=` | Balance de comprobación y saldos, acumulado del ejercicio |
 
 ## Normativa cargada
 
 La migración `0007` carga los valores de 2026 verificados el 29-10-2026 contra Previred, el SII, la Superintendencia de Pensiones (vía AAFP), ChileAtiende y la Dirección del Trabajo: ingreso mínimo (Leyes 21.751 y 21.830), topes imponibles (90 UF y 135,2 UF), tasas AFP, la cotización del empleador de la Ley 21.735 (3,5% desde agosto 2026), seguro de cesantía, salud, gratificación del artículo 50 y la tabla del impuesto único. **El contador responsable debe ratificarlos antes de la Fase 4.**
 
-## Próximo paso: Fase 1
+## Contabilidad (Fase 1.1)
 
-Libro diario con reversas, mayor, balance de 8 columnas y cierre mensual; RCV desde el SII; propuesta de F29; conciliación bancaria; sincronización diaria de UF y UTM; conexión del primer modelo de IA; Contralor; e interfaz web.
+Toda escritura contable pasa por funciones de la base de datos (`contabilidad_*`); la aplicación no puede insertar ni modificar asientos directamente.
+
+- **Asientos inmutables.** Se corrigen con una reversa vinculada; un asiento se reversa una sola vez.
+- **Correlativo** por ejercicio, sin saltos: un asiento rechazado no consume número.
+- **Meses** que se cierran en orden. Reabrir un mes del ejercicio en curso exige el permiso de períodos y un motivo.
+- **Ejercicio cerrado:** solo se reabre con dos aprobaciones de directores distintos de quien lo solicita, con referencia al acta y por un plazo de hasta 90 días.
+- **Agentes:** el Contador General puede consultar el balance y el mayor, y proponer asientos; una persona con permiso los aprueba.
+
+## Próximos pasos de la Fase 1
+
+Indicadores UF y UTM diarios; RCV desde el SII y propuesta de F29; conciliación bancaria; capa de IA con modelos locales y en la nube y reporte de costos por cliente; Contralor; interfaz web.

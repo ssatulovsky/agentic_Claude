@@ -197,6 +197,78 @@ export interface TablaTrazasAgente {
   creado_en: Timestamp;
 }
 
+export interface TablaEjerciciosContables {
+  id: Generated<string>;
+  empresa_id: string;
+  anio: number;
+  fecha_inicio: FechaSql;
+  fecha_termino: FechaSql;
+  estado: 'ABIERTO' | 'CERRADO';
+  cerrado_en: Date | null;
+  cerrado_por: string | null;
+  reabierto_hasta: FechaSql | null;
+  ultimo_numero: number;
+  creado_en: Timestamp;
+}
+
+export interface TablaPeriodosContables {
+  id: Generated<string>;
+  empresa_id: string;
+  ejercicio_id: string;
+  anio: number;
+  mes: number;
+  fecha_inicio: FechaSql;
+  fecha_termino: FechaSql;
+  estado: 'ABIERTO' | 'CERRADO';
+  cerrado_en: Date | null;
+  cerrado_por: string | null;
+}
+
+export interface TablaAsientos {
+  id: Generated<string>;
+  empresa_id: string;
+  ejercicio_id: string;
+  periodo_id: string;
+  numero: number;
+  fecha: FechaSql;
+  tipo: 'NORMAL' | 'APERTURA' | 'AJUSTE' | 'CIERRE' | 'REVERSA';
+  origen: 'MANUAL' | 'AGENTE' | 'MODULO';
+  glosa: string;
+  documento_referencia: string | null;
+  reversa_de: string | null;
+  propuesta_id: string | null;
+  total: Numerico;
+  registrado_por: string;
+  registrado_en: Timestamp;
+}
+
+export interface TablaAsientoLineas {
+  id: ColumnType<string, never, never>;
+  asiento_id: string;
+  empresa_id: string;
+  linea: number;
+  cuenta_id: string;
+  debe: Numerico;
+  haber: Numerico;
+  tercero_id: string | null;
+  centro_costo_id: string | null;
+  glosa: string | null;
+}
+
+export interface TablaSolicitudesReapertura {
+  id: Generated<string>;
+  empresa_id: string;
+  ejercicio_id: string;
+  motivo: string;
+  acta_referencia: string;
+  plazo_dias: number;
+  solicitado_por: string;
+  estado: 'PENDIENTE' | 'APROBADA' | 'RECHAZADA' | 'VENCIDA';
+  creado_en: Timestamp;
+  vence_en: Timestamp;
+  resuelta_en: Date | null;
+}
+
 export interface BaseDatos {
   empresas: TablaEmpresas;
   suscripciones_modulo: TablaSuscripcionesModulo;
@@ -213,4 +285,9 @@ export interface BaseDatos {
   agentes_config_empresa: TablaAgentesConfigEmpresa;
   propuestas_agente: TablaPropuestasAgente;
   trazas_agente: TablaTrazasAgente;
+  ejercicios_contables: TablaEjerciciosContables;
+  periodos_contables: TablaPeriodosContables;
+  asientos: TablaAsientos;
+  asiento_lineas: TablaAsientoLineas;
+  solicitudes_reapertura_ejercicio: TablaSolicitudesReapertura;
 }

@@ -18,6 +18,8 @@ export interface ContextoHerramienta {
   agenteCodigo: string;
   /** Fecha de referencia para reglas con vigencia (AAAA-MM-DD). */
   fecha: string;
+  /** Propuesta que se está ejecutando, cuando la acción fue aprobada por una persona. */
+  propuestaId?: string;
 }
 
 export interface DefinicionHerramienta<E = unknown, S = unknown> {
