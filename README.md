@@ -2,7 +2,7 @@
 
 ERP multiempresa para Chile en el que un equipo de agentes de IA atiende la administración y las finanzas, y un núcleo transaccional determinista valida, calcula y registra todo.
 
-> **Estado:** Fase 0 (Fundaciones) completa. Fase 1 en curso: libro diario, mayor y balance de 8 columnas listos (entrega 1.1). Todavía no hay interfaz web.
+> **Estado:** Fase 0 (Fundaciones) completa. Fase 1 en curso: libro diario, mayor y balance de 8 columnas (1.1), cierre anual automático y sincronización diaria de UF y UTM (1.2). Todavía no hay interfaz web.
 
 ## Principios
 
@@ -105,6 +105,7 @@ Cada ejecución crea una base de datos nueva, aplica todas las migraciones y la 
 | `GET /api/empresas/:id/normativa/indicadores/:tipo?fecha=` | UF, UTM, UTA |
 | `GET /api/empresas/:id/bitacora` | Auditoría de la empresa |
 | `GET /api/agentes` · `GET /api/empresas/:id/propuestas` · `POST …/propuestas/:id/resolver` | Agentes y aprobaciones |
+| `GET/PUT /api/empresas/:id/configuracion-contable` | Cuenta de resultado del ejercicio para el cierre anual |
 | `GET/POST /api/empresas/:id/ejercicios` | Ejercicios contables (crea sus meses) |
 | `POST …/periodos/:id/cerrar` · `POST …/periodos/:id/reabrir` | Cierre mensual y reapertura con motivo |
 | `POST …/ejercicios/:id/cerrar` | Cierre del ejercicio |
@@ -127,6 +128,35 @@ Toda escritura contable pasa por funciones de la base de datos (`contabilidad_*`
 - **Ejercicio cerrado:** solo se reabre con dos aprobaciones de directores distintos de quien lo solicita, con referencia al acta y por un plazo de hasta 90 días.
 - **Agentes:** el Contador General puede consultar el balance y el mayor, y proponer asientos; una persona con permiso los aprueba.
 
+## Cierre anual (Fase 1.2)
+
+Antes del primer cierre, defina la cuenta de patrimonio que recibe el resultado: `PUT /api/empresas/:id/configuracion-contable` con `{"cuentaResultadoEjercicio": "3.2"}`.
+
+Al cerrar un ejercicio, el sistema:
+
+1. Registra el **asiento de cierre**, que salda los ingresos y gastos contra esa cuenta.
+2. Crea el ejercicio siguiente si aún no existe.
+3. Registra la **apertura** con los saldos de balance y de orden, con detalle por tercero y centro de costo.
+
+Si el Directorio reabre el ejercicio, ambos asientos se reversan solos y se regeneran al volver a cerrar. Una apertura registrada a mano detiene el cierre hasta que se reverse.
+
+## Indicadores UF y UTM (Fase 1.2)
+
+`npm run cli:sincronizar-indicadores` descarga la UF y la UTM del año en curso y del siguiente, desde mindicador.cl (valores del Banco Central) y, si se define `CMF_API_KEY`, también desde la CMF. Reglas:
+
+- Con dos fuentes, un valor solo se guarda si ambas coinciden al centavo.
+- Un valor ya guardado nunca se sobrescribe: si una fuente publica otro distinto, se informa como conflicto.
+- Se rechazan las variaciones inverosímiles: más de 1% diario en la UF o más de 3% mensual en la UTM.
+- La UTA del mes se calcula como 12 × UTM.
+
+Prográmelo una vez al día (cron):
+
+```
+15 8 * * *  cd /opt/erp && npm run -s cli:sincronizar-indicadores >> /var/log/erp/indicadores.log 2>&1
+```
+
+El comando termina con código 2 si hubo discrepancias, conflictos o rechazos, para que el monitoreo avise.
+
 ## Próximos pasos de la Fase 1
 
-Indicadores UF y UTM diarios; RCV desde el SII y propuesta de F29; conciliación bancaria; capa de IA con modelos locales y en la nube y reporte de costos por cliente; Contralor; interfaz web.
+RCV desde el SII y propuesta de F29; conciliación bancaria; capa de IA con modelos locales y en la nube y reporte de costos por cliente; Contralor; interfaz web.

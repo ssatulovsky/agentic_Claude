@@ -11,7 +11,8 @@
     "cli:crear-cliente-erp": "tsx src/cli/crearClienteErp.ts",
     "test": "vitest run",
     "test:watch": "vitest",
-    "cli:verificar-bitacora": "tsx src/cli/verificarBitacora.ts"
+    "cli:verificar-bitacora": "tsx src/cli/verificarBitacora.ts",
+    "cli:sincronizar-indicadores": "tsx src/cli/sincronizarIndicadores.ts"
   },
   "license": "UNLICENSED",
   "dependencies": {
