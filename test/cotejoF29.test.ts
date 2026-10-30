@@ -76,10 +76,8 @@ describe('Archivo real del RCV descargado del SII', () => {
     ]);
   });
 
-  it('rechaza el archivo de resumen con una indicación de qué descargar', () => {
-    const resumen =
-      'Tipo Documento;Total Documentos;Monto Exento;Monto Neto;IVA Recuperable;IVA Uso Comun;IVA No Recuperable;Monto Total\n' +
-      'Factura no Afecta o Exenta Electrónica(34);1;30000;0;0;0;0;30000\n';
+  it('rechaza el archivo de resumen real del SII con una indicación de qué descargar', () => {
+    const resumen = readFileSync(new URL('./datos/rcv_compra_resumen_sii.csv', import.meta.url), 'utf8');
     expect(() => leerRcvCsv(resumen, 'COMPRA')).toThrow(/Descargar Detalles/u);
   });
 
@@ -125,5 +123,47 @@ describe('Cotejo con los F29 declarados (julio a septiembre de 2026)', () => {
     const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id));
     expect(noCero(f.codigos)).toEqual(DECLARADOS['2026-09']);
     expect(f.codigos['91']).toBe(0);
+  });
+});
+
+describe('Otros impuestos, IVA no retenido y crédito sin ventas afectas', () => {
+  // Columnas del detalle real: …;Monto Total(15);Neto AF;IVA AF;IVA uso Comun;Impto. Sin Derecho(19);IVA No Retenido(20);
+  // Tabacos Puros;Cigarrillos;Elaborados;NCE o NDE(24);Codigo Otro Impuesto(25);Valor Otro Impuesto(26);Tasa(27)
+  const fila = (folio: number, neto: number, iva: number, total: number, resto: string) =>
+    `${folio};33;Del Giro;76543210-3;PROVEEDOR SPA;${folio};10/06/2026;10/06/2026 10:00:00;;0;${neto};${iva};;;${total};;;;${resto}`;
+
+  it('separa impuestos sin crédito, guarda el código del otro impuesto y valida el indicador', () => {
+    const csv = [
+      ENCABEZADO_COMPRAS,
+      fila(1, 1000, 190, 1690, '0;0;500;0;0;0;;;;'), // tabaco: sin efecto en el F29
+      fila(2, 1000, 190, 1395, '0;0;;;;No;27;205;20,5'), // ILA, código 27
+      fila(3, 1000, 190, 1190, '0;95;;;;1;;;'), // IVA no retenido y nota sobre factura de compra
+    ].join('\n');
+    const l = leerRcvCsv(csv, 'COMPRA');
+    expect(l.documentos.map((d) => [d.impuestos_sin_credito, d.otros_impuestos, d.codigo_otro_impuesto, d.iva_no_retenido])).toEqual([
+      [500, 0, null, 0],
+      [0, 205, 27, 0],
+      [0, 0, null, 95],
+    ]);
+    expect(l.advertencias).toEqual([expect.stringMatching(/Fila 4 \(folio 3\): nota de crédito o débito sobre una factura de compra/u)]);
+    expect(() => leerRcvCsv(csv.replace(';1;;;', ';X;;;'), 'COMPRA')).toThrow(/indicador de nota/u);
+  });
+
+  it('la propuesta muestra el código del otro impuesto y el IVA no retenido, y advierte el crédito sin ventas afectas', async () => {
+    await importar(
+      'COMPRA',
+      6,
+      [ENCABEZADO_COMPRAS, fila(1, 1000, 190, 1690, '0;0;500;0;0;0;;;;'), fila(2, 1000, 190, 1395, '0;0;;;;0;27;205;20,5'), fila(3, 1000, 190, 1190, '0;95;;;;0;;;')].join('\n'),
+    );
+    await importar('VENTA', 6, [ENCABEZADO_VENTAS, '1;34;Del Giro;76111222-8;CLIENTE SPA;20;12/06/2026;12/06/2026;;;900000;0;0;900000;0;0;0;0;0'].join('\n'));
+    const id = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2026, mes: 6, remanenteAnterior: 0 }));
+    const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id));
+    const especiales = f.advertencias.find((a) => a.tipo === 'DOCUMENTOS_CON_MONTOS_ESPECIALES')!;
+    expect(especiales.detalle).toEqual([
+      expect.objectContaining({ concepto: 'IVA no retenido (factura de compra con retención parcial)', monto: 95 }),
+      expect.objectContaining({ concepto: 'Otro impuesto, código SII 27 (ILA, IVA anticipado, diésel u otro)', monto: 205 }),
+    ]);
+    expect(f.advertencias.map((a) => a.tipo)).toContain('CREDITO_SIN_VENTAS_AFECTAS');
+    expect(f.codigos['520']).toBe(570);
   });
 });
