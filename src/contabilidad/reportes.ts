@@ -8,12 +8,15 @@ import { aCentavos, deCentavos, maxCentavos } from '../utilidades/montos.js';
  * Reglas:
  *   * Un reporte cubre un solo ejercicio y acumula desde su inicio (incluye el
  *     asiento de apertura), así los saldos son siempre los reales.
- *   * Los asientos de CIERRE no se incluyen: el balance muestra el resultado
- *     antes de su traspaso a patrimonio.
+ *   * Los asientos de CIERRE (y sus reversas) no se incluyen: el balance muestra
+ *     el resultado antes de su traspaso a patrimonio.
  *   * Solo se ven las líneas que el usuario puede ver (seguridad por fila).
  */
 
 const CUENTAS_DE_RESULTADO = new Set(['INGRESO', 'GASTO']);
+
+/** Excluye el asiento de cierre y sus reversas (requiere el alias "a" y "o" = asiento reversado). */
+const sinCierre = sql`a.tipo <> 'CIERRE' AND (o.id IS NULL OR o.tipo <> 'CIERRE')`;
 
 async function ejercicioDe(trx: Trx, empresaId: string, fecha: string) {
   const ejercicio = await trx
@@ -60,10 +63,11 @@ export async function balanceOchoColumnas(trx: Trx, empresaId: string, hasta: st
     FROM asiento_lineas l
     JOIN asientos a ON a.id = l.asiento_id
     JOIN plan_cuentas c ON c.id = l.cuenta_id
+    LEFT JOIN asientos o ON o.id = a.reversa_de
     WHERE l.empresa_id = ${empresaId}::uuid
       AND a.ejercicio_id = ${ejercicio.id}::uuid
       AND a.fecha <= ${hasta}::date
-      AND a.tipo <> 'CIERRE'
+      AND ${sinCierre}
     GROUP BY c.codigo, c.nombre, c.clasificacion
     ORDER BY c.codigo`.execute(trx);
 
@@ -174,8 +178,9 @@ export async function libroMayor(trx: Trx, empresaId: string, codigoCuenta: stri
   const { rows: previo } = await sql<{ debe: string | null; haber: string | null }>`
     SELECT sum(l.debe)::text AS debe, sum(l.haber)::text AS haber
     FROM asiento_lineas l JOIN asientos a ON a.id = l.asiento_id
+    LEFT JOIN asientos o ON o.id = a.reversa_de
     WHERE l.empresa_id = ${empresaId}::uuid AND l.cuenta_id IN (${cuentas})
-      AND a.ejercicio_id = ${ejercicio.id}::uuid AND a.fecha < ${desde}::date AND a.tipo <> 'CIERRE'`.execute(trx);
+      AND a.ejercicio_id = ${ejercicio.id}::uuid AND a.fecha < ${desde}::date AND ${sinCierre}`.execute(trx);
   const saldoInicial = signo * (aCentavos(previo[0]?.debe ?? '0') - aCentavos(previo[0]?.haber ?? '0'));
 
   const { rows } = await sql<{ fecha: string; numero: number; cuenta: string; glosa: string; debe: string; haber: string; tercero: string | null }>`
@@ -185,9 +190,10 @@ export async function libroMayor(trx: Trx, empresaId: string, codigoCuenta: stri
     JOIN asientos a ON a.id = l.asiento_id
     JOIN plan_cuentas c ON c.id = l.cuenta_id
     LEFT JOIN terceros t ON t.id = l.tercero_id
+    LEFT JOIN asientos o ON o.id = a.reversa_de
     WHERE l.empresa_id = ${empresaId}::uuid AND l.cuenta_id IN (${cuentas})
       AND a.ejercicio_id = ${ejercicio.id}::uuid
-      AND a.fecha BETWEEN ${desde}::date AND ${hasta}::date AND a.tipo <> 'CIERRE'
+      AND a.fecha BETWEEN ${desde}::date AND ${hasta}::date AND ${sinCierre}
     ORDER BY a.fecha, a.numero, l.linea`.execute(trx);
 
   let saldo = saldoInicial;

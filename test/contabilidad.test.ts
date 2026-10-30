@@ -76,6 +76,15 @@ beforeAll(async () => {
     rutProveedor,
   ]);
   await q(`INSERT INTO centros_costo (empresa_id, codigo, nombre) VALUES ($1, 'ADM', 'Administración')`, [e.empresaA1]);
+  await q(
+    `INSERT INTO plan_cuentas (empresa_id, codigo, nombre, clasificacion, naturaleza, imputable) VALUES ($1, '3.2', 'Resultado del ejercicio', 'PATRIMONIO', 'ACREEDORA', true)`,
+    [e.empresaA1],
+  );
+  await q(
+    `INSERT INTO configuracion_contable (empresa_id, cuenta_resultado_ejercicio_id, actualizado_por)
+     SELECT $1, id, $2 FROM plan_cuentas WHERE empresa_id = $1 AND codigo = '3.2'`,
+    [e.empresaA1, e.usuarios.contadorA1.id],
+  );
   // Directores designados ANTES de cualquier solicitud; uno sin doble factor.
   for (let i = 0; i < 3; i++) {
     const id = await nuevoUsuario(`director${i}`, true);
@@ -158,13 +167,15 @@ describe('Ejercicio y registro de asientos', () => {
   });
 
   it('el asiento de apertura va el primer día del ejercicio y hay uno solo vigente', async () => {
+    // Ejercicio aparte, para no interferir con el cierre anual de 2025 más abajo.
+    await comoContador((trx) => crearEjercicio(trx, e.empresaA1, 2030));
     const lineas = [
       { cuenta: '1.1.01', debe: 1 },
       { cuenta: '3.1', haber: 1 },
     ];
-    await expect(asiento('2025-05-10', 'Apertura tardía', lineas, 'APERTURA')).rejects.toThrow(/debe tener fecha 2025-01-01/u);
-    await asiento('2025-01-01', 'Apertura', lineas, 'APERTURA');
-    await expect(asiento('2025-01-01', 'Otra apertura', lineas, 'APERTURA')).rejects.toThrow(/ya tiene un asiento de apertura/u);
+    await expect(asiento('2030-05-10', 'Apertura tardía', lineas, 'APERTURA')).rejects.toThrow(/debe tener fecha 2030-01-01/u);
+    await asiento('2030-01-01', 'Apertura', lineas, 'APERTURA');
+    await expect(asiento('2030-01-01', 'Otra apertura', lineas, 'APERTURA')).rejects.toThrow(/ya tiene un asiento de apertura/u);
   });
 
   it('rechaza fechas fuera de un ejercicio', async () => {
@@ -232,8 +243,8 @@ describe('Libro mayor y balance de 8 columnas', () => {
     const b = await comoContador((trx) => balanceOchoColumnas(trx, e.empresaA1, '2025-01-31'));
     expect(b.cuadrado).toBe(true);
     expect(b.desde).toBe('2025-01-01');
-    // 10.000.000 + 1.000.000 + 500.000 + 300.000 + 1 + apertura 1 (las cuentas de orden van aparte)
-    expect(b.sumas.debitos).toBe('11800002.00');
+    // 10.000.000 + 1.000.000 + 500.000 + 300.000 + 1 (las cuentas de orden van aparte)
+    expect(b.sumas.debitos).toBe('11800001.00');
     expect(b.sumas.debitos).toBe(b.sumas.creditos);
     expect(b.resultadoEjercicio).toBe('200001.00'); // ventas 1.000.001 − sueldos 500.000 − arriendo 300.000
     expect(b.totales.activo).toBe(b.totales.pasivo);
@@ -258,8 +269,8 @@ describe('Libro mayor y balance de 8 columnas', () => {
 
   it('el mayor de una cuenta de agrupación suma sus subcuentas', async () => {
     const m = await comoContador((trx) => libroMayor(trx, e.empresaA1, '1.1', '2025-01-01', '2025-01-31'));
-    // Caja 10.000.000 + 1 (ajuste) + 1 (apertura) y Banco 1.000.000 − 500.000
-    expect(m.saldoFinal).toBe('10500002.00');
+    // Caja 10.000.000 + 1 (ajuste) y Banco 1.000.000 − 500.000
+    expect(m.saldoFinal).toBe('10500001.00');
     expect(new Set(m.movimientos.map((x) => x.cuenta))).toEqual(new Set(['1.1.01', '1.1.02']));
   });
 

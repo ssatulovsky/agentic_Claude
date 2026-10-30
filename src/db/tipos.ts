@@ -269,6 +269,13 @@ export interface TablaSolicitudesReapertura {
   resuelta_en: Date | null;
 }
 
+export interface TablaConfiguracionContable {
+  empresa_id: string;
+  cuenta_resultado_ejercicio_id: string;
+  actualizado_en: Timestamp;
+  actualizado_por: string;
+}
+
 export interface BaseDatos {
   empresas: TablaEmpresas;
   suscripciones_modulo: TablaSuscripcionesModulo;
@@ -290,4 +297,5 @@ export interface BaseDatos {
   asientos: TablaAsientos;
   asiento_lineas: TablaAsientoLineas;
   solicitudes_reapertura_ejercicio: TablaSolicitudesReapertura;
+  configuracion_contable: TablaConfiguracionContable;
 }
