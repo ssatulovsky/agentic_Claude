@@ -1,3 +1,4 @@
+import { sql } from 'kysely';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import {
   cerrarEjercicio,
@@ -91,7 +92,7 @@ afterAll(async () => {
 
 describe('Configuración previa', () => {
   it('sin la cuenta de resultado configurada no se cierra el ejercicio', async () => {
-    await expect(comoContador((trx) => cerrarEjercicio(trx, ej2023))).rejects.toThrow(/Configure la cuenta de resultado/u);
+    await expect(comoContador((trx) => cerrarEjercicio(trx, ej2023))).rejects.toThrow(/Configure una cuenta de resultado/u);
   });
 
   it('la cuenta de resultado debe ser de patrimonio e imputable', async () => {
@@ -153,7 +154,7 @@ describe('Cierre anual', () => {
   it('el asiento de cierre no se reversa a mano', async () => {
     const [cierre] = await vigente(ej2023, 'CIERRE');
     await expect(comoContador((trx) => reversarAsiento(trx, cierre!, '2023-12-31', 'Intento manual de reversa'))).rejects.toThrow(
-      /lo reversa el sistema/u,
+      /los reversa el sistema/u,
     );
   });
 });
@@ -202,5 +203,65 @@ describe('Reapertura y nuevo cierre', () => {
     await expect(
       comoContador((trx) => solicitarReaperturaEjercicio(trx, ej2023, 'Otra corrección pendiente del año', 'Acta de Directorio N° 8', 5)),
     ).rejects.toThrow(/posterior cerrado/u);
+  });
+});
+
+describe('Controles agregados tras la revisión independiente', () => {
+  it('ninguna función queda ejecutable por PUBLIC', async () => {
+    const { rows } = await e.owner.query(`
+      SELECT p.proname FROM pg_proc p JOIN pg_namespace n ON n.oid = p.pronamespace
+      WHERE n.nspname = 'public' AND p.proowner = 'erp_owner'::regrole
+        AND (p.proacl IS NULL OR EXISTS (SELECT 1 FROM aclexplode(p.proacl) a WHERE a.grantee = 0 AND a.privilege_type = 'EXECUTE'))`);
+    expect(rows.map((r) => r.proname)).toEqual([]);
+  });
+
+  it('la aplicación no puede llamar a las funciones internas del cierre', async () => {
+    await expect(
+      comoContador((trx) =>
+        sql`SELECT contabilidad_crear_ejercicio_interno(${e.empresaA1}::uuid, 2040, '2040-01-01'::date)`.execute(trx),
+      ),
+    ).rejects.toMatchObject({ code: '42501' });
+  });
+
+  it('nadie registra un asiento con origen de sistema ni reversa a mano una apertura automática', async () => {
+    await expect(
+      comoContador((trx) =>
+        sql`SELECT contabilidad_registrar_asiento(${e.empresaA1}::uuid, '2025-01-01'::date, 'falsa', '[{"cuenta":"1.1.01","debe":1},{"cuenta":"3.1","haber":1}]'::jsonb, 'APERTURA', NULL, 'MODULO')`.execute(trx),
+      ),
+    ).rejects.toThrow(/Origen no permitido/u);
+    const { rows } = await e.owner.query(`SELECT id FROM ejercicios_contables WHERE empresa_id = $1 AND anio = 2025`, [e.empresaA1]);
+    const [apertura] = await vigente(rows[0].id, 'APERTURA');
+    await expect(comoContador((trx) => reversarAsiento(trx, apertura!, '2025-01-01', 'Intento manual de reversa'))).rejects.toThrow(
+      /los reversa el sistema/u,
+    );
+  });
+});
+
+describe('Orden entre ejercicios ante reaperturas', () => {
+  const idEjercicio = async (anio: number) =>
+    (await e.owner.query(`SELECT id FROM ejercicios_contables WHERE empresa_id = $1 AND anio = $2`, [e.empresaA1, anio])).rows[0].id as string;
+  const aprobar = async (sol: string) => {
+    await como(directores[0]!, (trx) => resolverReaperturaEjercicio(trx, sol, 'APROBAR', null));
+    return como(directores[1]!, (trx) => resolverReaperturaEjercicio(trx, sol, 'APROBAR', null));
+  };
+
+  it('si se cierra un ejercicio posterior mientras la solicitud espera, la reapertura ya no procede', async () => {
+    const sol = await comoContador((trx) =>
+      solicitarReaperturaEjercicio(trx, ej2024, 'Revisión de provisiones del año 2024', 'Acta de Directorio N° 9', 5),
+    );
+    const ej2025 = await idEjercicio(2025);
+    await cerrarMeses(ej2025);
+    await comoContador((trx) => cerrarEjercicio(trx, ej2025));
+    await expect(aprobar(sol)).rejects.toThrow(/ejercicio posterior/u);
+  });
+
+  it('un ejercicio reabierto y no vuelto a cerrar impide cerrar el siguiente, aunque su plazo haya vencido', async () => {
+    const ej2025 = await idEjercicio(2025);
+    const sol = await comoContador((trx) =>
+      solicitarReaperturaEjercicio(trx, ej2025, 'Revisión de provisiones del año 2025', 'Acta de Directorio N° 10', 5),
+    );
+    expect(await aprobar(sol)).toBe('APROBADA');
+    await e.owner.query(`UPDATE ejercicios_contables SET reabierto_hasta = '2020-01-01' WHERE id = $1`, [ej2025]);
+    await expect(comoContador(async (trx) => cerrarEjercicio(trx, await idEjercicio(2026)))).rejects.toThrow(/ejercicio anterior/u);
   });
 });

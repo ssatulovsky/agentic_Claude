@@ -134,18 +134,58 @@ describe('Sincronización', () => {
     expect(await valor('UF', '2026-11-04')).toBeUndefined();
   });
 
-  it('si una fuente falla, informa el error y sigue con las demás; todo queda en la bitácora', async () => {
+  it('con dos fuentes configuradas, si una falla no se guarda nada sin confirmar; todo queda en la bitácora', async () => {
     const caida = new FuenteMindicador(simulado({}, 500));
     const sana = new FuenteFija('Fuente E', [{ tipo: 'UF', fecha: '2026-11-05', valor: '41270.00' }]);
     const cliente = await e.owner.connect();
     try {
       const r = await sincronizarIndicadores(cliente, [caida, sana], [2026], ['UF']);
       expect(r.erroresFuente).toHaveLength(1);
-      expect(r.insertados).toBe(1);
+      expect(r.insertados).toBe(0);
+      expect(r.sinConfirmar).toEqual([{ tipo: 'UF', fecha: '2026-11-05', motivo: 'solo lo publicó Fuente E' }]);
     } finally {
       cliente.release();
     }
+    expect(await valor('UF', '2026-11-05')).toBeUndefined();
     const { rows } = await e.owner.query(`SELECT datos FROM bitacora WHERE accion = 'indicadores.sincronizados' ORDER BY id DESC LIMIT 1`);
     expect(rows[0].datos.errores_fuente).toHaveLength(1);
+  });
+
+  it('con una sola fuente y sin valor de referencia, no guarda (exige dos fuentes)', async () => {
+    const cliente = await e.owner.connect();
+    try {
+      const r = await sincronizarIndicadores(cliente, [new FuenteFija('Fuente F', [{ tipo: 'UF', fecha: '2031-06-01', valor: '50000.00' }])], [2031], ['UF']);
+      expect(r.sinConfirmar[0]!.motivo).toMatch(/sin valor de referencia/u);
+    } finally {
+      cliente.release();
+    }
+    expect(await valor('UF', '2031-06-01')).toBeUndefined();
+  });
+
+  it('compara también con el valor posterior (relleno hacia atrás)', async () => {
+    const cliente = await e.owner.connect();
+    try {
+      // 2026-09-29 contra el 2026-09-30 guardado (41.057,20): un punto decimal corrido se rechaza.
+      const r = await sincronizarIndicadores(cliente, [new FuenteFija('Fuente G', [{ tipo: 'UF', fecha: '2026-09-29', valor: '4105.20' }])], [2026], ['UF']);
+      expect(r.rechazados[0]!.motivo).toMatch(/2026-09-30/u);
+    } finally {
+      cliente.release();
+    }
+  });
+
+  it('rechaza una fuente que publica dos valores para la misma fecha o más de 2 decimales', async () => {
+    const duplicada = new FuenteMindicador(
+      simulado({
+        '/api/uf/2026': {
+          serie: [
+            { fecha: '2026-04-05T03:00:00.000Z', valor: 39000 },
+            { fecha: '2026-04-04T04:00:00.000Z', valor: 39001 },
+          ],
+        },
+      }),
+    );
+    await expect(duplicada.obtener('UF', 2026)).rejects.toThrow(/dos valores para 2026-04-04/u);
+    const decimales = new FuenteMindicador(simulado({ '/api/uf/2026': { serie: [{ fecha: '2026-04-06T04:00:00.000Z', valor: 39485.645 }] } }));
+    await expect(decimales.obtener('UF', 2026)).rejects.toThrow(/más de 2 decimales/u);
   });
 });

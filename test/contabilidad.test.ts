@@ -280,9 +280,10 @@ describe('Libro mayor y balance de 8 columnas', () => {
     );
   });
 
-  it('quien no tiene permiso de ver asientos obtiene un balance vacío (seguridad por fila)', async () => {
-    const b = await como(e.usuarios.colaboradorA1.id, (trx) => balanceOchoColumnas(trx, e.empresaA1, '2025-12-31'));
-    expect(b.filas).toHaveLength(0);
+  it('quien no tiene permiso de ver asientos no obtiene el balance', async () => {
+    await expect(como(e.usuarios.colaboradorA1.id, (trx) => balanceOchoColumnas(trx, e.empresaA1, '2025-12-31'))).rejects.toMatchObject({
+      code: '42501',
+    });
   });
 });
 

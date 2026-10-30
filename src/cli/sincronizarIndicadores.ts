@@ -8,7 +8,7 @@ import { FuenteCmf, FuenteMindicador, sincronizarIndicadores, type FuenteIndicad
  *
  * Fuentes: mindicador.cl siempre; además la CMF si se define CMF_API_KEY (con dos
  * fuentes, un valor solo se guarda si ambas coinciden).
- * Código de salida 2 si hubo discrepancias, conflictos o valores rechazados, para
+ * Código de salida 2 si hubo discrepancias, conflictos, valores sin confirmar o rechazados, para
  * que el monitoreo avise a una persona.
  */
 async function main(): Promise<void> {
@@ -26,7 +26,7 @@ async function main(): Promise<void> {
   try {
     const r = await sincronizarIndicadores(cliente, fuentes, anios);
     console.log(JSON.stringify({ fecha: new Date().toISOString(), ...r }, null, 2));
-    if (r.discrepancias.length || r.conflictos.length || r.rechazados.length) process.exitCode = 2;
+    if (r.discrepancias.length || r.conflictos.length || r.rechazados.length || r.sinConfirmar.length) process.exitCode = 2;
     if (r.erroresFuente.length === fuentes.length * anios.length * 2) process.exitCode = 1;
   } finally {
     await cliente.end();
