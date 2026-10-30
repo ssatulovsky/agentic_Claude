@@ -223,6 +223,7 @@ describe('Vinculación del teléfono', () => {
       registrar: { warn() {}, error() {} },
     });
     await silencioso.recibir({ id: 'contacto-personal-1', de: '+56966666666', tipo: 'TEXTO', texto: 'Hola Sergio, ¿almorzamos?' });
+    await silencioso.recibir({ id: 'contacto-personal-2', de: '+56966666666', tipo: 'TEXTO', texto: 'VINCULAR 000000' });
     await silencioso.esperarPendientes();
     expect(enviados.filter((x) => x.para === '+56966666666')).toEqual([]);
   });

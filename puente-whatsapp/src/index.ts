@@ -24,6 +24,8 @@ let conectado = false;
 let propio: string | null = null;
 let propioLid: string | null = null;
 let reintentoConexion = 0;
+/** Hasta cuándo (segundos Unix) está abierta la conversación del titular consigo mismo con el ERP. */
+let sesionPropiaHasta = 0;
 const enviados = new ConjuntoAcotado();
 const recibidos = new ConjuntoAcotado();
 
@@ -68,7 +70,10 @@ async function conectar(): Promise<void> {
   mkdirSync(config.sesionDir, { recursive: true, mode: 0o700 });
   chmodSync(config.sesionDir, 0o700);
   const { state, saveCreds } = await useMultiFileAuthState(config.sesionDir);
-  const { version } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
+  // Versión del protocolo de WhatsApp Web: se consulta la vigente; si no responde o no tiene
+  // la forma esperada, se usa la que trae la librería.
+  const { version: vigente } = await fetchLatestBaileysVersion().catch(() => ({ version: undefined }));
+  const version = Array.isArray(vigente) && vigente.length === 3 && vigente.every((n) => Number.isInteger(n) && n >= 0) ? vigente : undefined;
   sock = makeWASocket({
     ...(version ? { version } : {}),
     auth: state,
@@ -82,32 +87,40 @@ async function conectar(): Promise<void> {
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async ({ connection, lastDisconnect, qr }) => {
-    if (qr) {
-      log('qr', { instruccion: 'Escanee el código con WhatsApp > Dispositivos vinculados' });
-      console.log(await QRCode.toString(qr, { type: 'terminal', small: true }));
-      const archivo = join(config.sesionDir, 'qr.png');
-      writeFileSync(archivo, await QRCode.toBuffer(qr, { width: 320 }), { mode: 0o600 });
-    }
-    if (connection === 'open') {
-      conectado = true;
-      reintentoConexion = 0;
-      propio = telefonoDesdeJid(`${usuarioDeJid(sock?.user?.id)}@s.whatsapp.net`);
-      propioLid = sock?.user?.lid ? usuarioDeJid(sock.user.lid) : null;
-      log('conectado', { modo: config.modo });
-      void latido();
-    }
-    if (connection === 'close') {
-      conectado = false;
-      void latido();
-      const codigo = (lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
-      if (codigo === DisconnectReason.loggedOut) {
-        log('sesion_cerrada', { instruccion: `Se cerró la sesión desde el teléfono. Borre ${config.sesionDir} y vuelva a iniciar el puente para escanear un QR nuevo.` });
-        return;
+    try {
+      if (qr) {
+        log('qr', { instruccion: 'Escanee el código con WhatsApp > Dispositivos vinculados' });
+        console.log(await QRCode.toString(qr, { type: 'terminal', small: true }));
+        const archivo = join(config.sesionDir, 'qr.png');
+        writeFileSync(archivo, await QRCode.toBuffer(qr, { width: 320 }), { mode: 0o600 });
       }
-      reintentoConexion++;
-      const espera = Math.min(60_000, 2000 * reintentoConexion);
-      log('reconectando', { codigo, esperaMs: espera });
-      setTimeout(() => void conectar().catch((e) => log('error_conexion', { error: (e as Error).message })), espera);
+      if (connection === 'open') {
+        conectado = true;
+        reintentoConexion = 0;
+        propio = telefonoDesdeJid(`${usuarioDeJid(sock?.user?.id)}@s.whatsapp.net`);
+        propioLid = sock?.user?.lid ? usuarioDeJid(sock.user.lid) : null;
+        log('conectado', { modo: config.modo });
+        void latido();
+      }
+      if (connection === 'close') {
+        conectado = false;
+        void latido();
+        const codigo = (lastDisconnect?.error as { output?: { statusCode?: number } } | undefined)?.output?.statusCode;
+        if (codigo === DisconnectReason.loggedOut) {
+          log('sesion_cerrada', { instruccion: `Se cerró la sesión desde el teléfono. Borre ${config.sesionDir} y vuelva a iniciar el puente para escanear un QR nuevo.` });
+          return;
+        }
+        if (codigo === DisconnectReason.connectionReplaced) {
+          log('sesion_reemplazada', { instruccion: 'Otra instancia del puente (u otra sesión) tomó la conexión. Deje solo una y reinicie este puente.' });
+          return;
+        }
+        reintentoConexion++;
+        const espera = Math.min(60_000, 2000 * reintentoConexion);
+        log('reconectando', { codigo, esperaMs: espera });
+        setTimeout(() => void conectar().catch((e) => log('error_conexion', { error: (e as Error).message })), espera);
+      }
+    } catch (e) {
+      log('error_estado_conexion', { error: (e as Error).message });
     }
   });
 
@@ -123,7 +136,14 @@ async function conectar(): Promise<void> {
         ahoraS: Math.floor(Date.now() / 1000),
         edadMaximaS: config.edadMaximaS,
         audioMaxBytes: config.audioMaxBytes,
+        prefijo: config.prefijo,
+        sesionPropiaHasta,
       });
+      if (d.sesion === 'ABRIR') sesionPropiaHasta = Math.floor(Date.now() / 1000) + config.ventanaS;
+      if (d.sesion === 'CERRAR') {
+        sesionPropiaHasta = 0;
+        if (propio) await enviarTexto(propio, `Conversación con el ERP cerrada. Escriba «${config.prefijo}» y su consulta para volver.`).catch(() => undefined);
+      }
       if (!d.reenviar) continue;
       if (recibidos.has(d.id)) continue;
       recibidos.add(d.id);
@@ -131,8 +151,8 @@ async function conectar(): Promise<void> {
         if (d.contenido.tipo === 'TEXTO') {
           await alErp('/api/canales/whatsapp/mensajes', { id: d.id, de: d.de, tipo: 'TEXTO', texto: d.contenido.texto });
         } else {
-          const audio = (await downloadMediaMessage(msg, 'buffer', {}, { logger: silencioso, reuploadRequest: sock!.updateMediaMessage })) as Buffer;
-          if (audio.length > config.audioMaxBytes) {
+          const audio = await descargarAcotado(msg, config.audioMaxBytes);
+          if (!audio) {
             log('audio_grande', { id: d.id });
             continue;
           }
@@ -146,6 +166,34 @@ async function conectar(): Promise<void> {
   });
 }
 
+/** Descarga una nota de voz contando bytes: corta apenas supera el máximo (no confía en el largo declarado). */
+async function descargarAcotado(msg: unknown, maximo: number): Promise<Buffer | null> {
+  const flujo = (await downloadMediaMessage(msg as Parameters<typeof downloadMediaMessage>[0], 'stream', {}, {
+    logger: silencioso,
+    reuploadRequest: sock!.updateMediaMessage,
+  })) as AsyncIterable<Buffer> & { destroy(): void };
+  const partes: Buffer[] = [];
+  let total = 0;
+  for await (const parte of flujo) {
+    total += parte.length;
+    if (total > maximo) {
+      flujo.destroy();
+      return null;
+    }
+    partes.push(parte);
+  }
+  return Buffer.concat(partes);
+}
+
+class ErrorHttp extends Error {
+  constructor(
+    readonly estado: number,
+    readonly codigo: string,
+  ) {
+    super(codigo);
+  }
+}
+
 /** Servidor local para que el ERP envíe respuestas: POST /enviar firmado. */
 function leerCuerpo(req: IncomingMessage, maximo: number): Promise<string> {
   return new Promise((resolver, rechazar) => {
@@ -154,7 +202,7 @@ function leerCuerpo(req: IncomingMessage, maximo: number): Promise<string> {
     req.on('data', (c: Buffer) => {
       total += c.length;
       if (total > maximo) {
-        rechazar(new Error('Cuerpo demasiado grande'));
+        rechazar(new ErrorHttp(413, 'DEMASIADO_GRANDE'));
         req.destroy();
       } else partes.push(c);
     });
@@ -177,13 +225,22 @@ createServer(async (req, res) => {
     if (!firmaValida(config.secreto, typeof marca === 'string' ? marca : undefined, typeof firma === 'string' ? firma : undefined, 'POST /enviar', cuerpo)) {
       return responder(res, 401, { error: 'FIRMA_INVALIDA' });
     }
-    const d = JSON.parse(cuerpo) as { para?: unknown; texto?: unknown };
+    let d: { para?: unknown; texto?: unknown };
+    try {
+      d = JSON.parse(cuerpo) as { para?: unknown; texto?: unknown };
+    } catch {
+      return responder(res, 400, { error: 'JSON_INVALIDO' });
+    }
     if (typeof d.para !== 'string' || typeof d.texto !== 'string' || !d.texto || d.texto.length > 4096) return responder(res, 422, { error: 'DATOS_INVALIDOS' });
     if (!destinoPermitido(d.para, { propio, modo: config.modo, permitidos: config.permitidos })) return responder(res, 403, { error: 'DESTINO_NO_PERMITIDO' });
     if (!conectado) return responder(res, 503, { error: 'DESCONECTADO' });
     await enviarTexto(d.para, d.texto);
     return responder(res, 200, { enviado: true });
   } catch (e) {
+    if (e instanceof ErrorHttp) {
+      if (!res.headersSent) responder(res, e.estado, { error: e.codigo });
+      return;
+    }
     log('error_envio', { error: (e as Error).message });
     if (!res.headersSent) responder(res, 500, { error: 'ERROR' });
   }

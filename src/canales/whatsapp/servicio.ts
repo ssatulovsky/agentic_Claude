@@ -192,7 +192,9 @@ export class ServicioWhatsapp {
         SIN_VINCULACION_PENDIENTE: 'No hay una vinculación pendiente para este número. Iníciela en la web, en "WhatsApp".',
       };
       // Los intentos fallidos reciben respuesta a lo más 3 veces por hora y número.
-      if (resultado === 'VINCULADO' || this.avisosVinculacion.permitir(m.de)) {
+      // Sin vinculación pendiente para ese número, es un desconocido: con avisos apagados, silencio.
+      const silenciar = resultado === 'SIN_VINCULACION_PENDIENTE' && this.deps.avisarNoVinculados === false;
+      if (resultado === 'VINCULADO' || (!silenciar && this.avisosVinculacion.permitir(m.de))) {
         await this.responder(id, m.de, textos[resultado] ?? 'No se pudo vincular.', null, `VINCULAR:${resultado}`);
       } else {
         await this.marcar(id, 'IGNORADO', null, `VINCULAR:${resultado}`);

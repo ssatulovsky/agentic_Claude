@@ -13,6 +13,8 @@ const ctx = (modo: Modo = 'PERSONAL', permitidos: string[] = []) => ({
   ahoraS,
   edadMaximaS: 300,
   audioMaxBytes: 8 * 1024 * 1024,
+  prefijo: 'erp',
+  sesionPropiaHasta: 0,
 });
 const msg = (p: { id?: string; chat: string; fromMe?: boolean; texto?: string; audio?: boolean; ts?: number; senderPn?: string }): MensajeEntranteWa => ({
   key: { id: p.id ?? 'M1', remoteJid: p.chat, fromMe: p.fromMe ?? false, ...(p.senderPn ? { senderPn: p.senderPn } : {}) },
@@ -29,12 +31,13 @@ describe('Puente WhatsApp (Baileys): qué se reenvía al ERP', () => {
   });
 
   it('con número personal solo pasa el chat consigo mismo (también por LID)', () => {
-    expect(decidir(msg({ chat: '56911111111@s.whatsapp.net', fromMe: true, texto: '¿Saldo del banco?' }), ctx())).toMatchObject({
+    expect(decidir(msg({ chat: '56911111111@s.whatsapp.net', fromMe: true, texto: 'erp ¿Saldo del banco?' }), ctx())).toMatchObject({
       reenviar: true,
       de: PROPIO,
       contenido: { tipo: 'TEXTO', texto: '¿Saldo del banco?' },
+      sesion: 'ABRIR',
     });
-    expect(decidir(msg({ chat: '123456789012345@lid', fromMe: true }), ctx())).toMatchObject({ reenviar: true, de: PROPIO });
+    expect(decidir(msg({ chat: '123456789012345@lid', fromMe: true, texto: 'ERP: hola' }), ctx())).toMatchObject({ reenviar: true, de: PROPIO, contenido: { texto: 'hola' } });
     // Un contacto personal nunca llega al ERP, ni lo que el titular le escribe.
     expect(decidir(msg({ chat: '56922222222@s.whatsapp.net' }), ctx())).toEqual({ reenviar: false, motivo: 'NO_PERMITIDO' });
     expect(decidir(msg({ chat: '56922222222@s.whatsapp.net', fromMe: true }), ctx())).toEqual({ reenviar: false, motivo: 'ESCRITO_POR_EL_TITULAR' });
@@ -56,18 +59,39 @@ describe('Puente WhatsApp (Baileys): qué se reenvía al ERP', () => {
     expect(decidir(msg({ chat: '120363@g.us' }), c)).toEqual({ reenviar: false, motivo: 'NO_DIRECTO' });
     expect(decidir(msg({ chat: 'status@broadcast' }), c)).toEqual({ reenviar: false, motivo: 'NO_DIRECTO' });
     expect(decidir(msg({ chat: '56911111111@s.whatsapp.net', fromMe: true, ts: ahoraS - 3600 }), c)).toEqual({ reenviar: false, motivo: 'ANTIGUO' });
+    // Lo que el titular conversa con Meta AI tampoco.
+    const metaIa = msg({ chat: '56911111111@s.whatsapp.net', fromMe: true, texto: 'erp hola' });
+    metaIa.message = { conversation: 'erp hola', messageContextInfo: { botMetadata: {} } };
+    expect(decidir(metaIa, c)).toEqual({ reenviar: false, motivo: 'META_IA' });
+    expect(decidir(msg({ chat: '13135550002@bot', texto: 'hola' }), c)).toEqual({ reenviar: false, motivo: 'META_IA' });
   });
 
-  it('las notas de voz se reconocen (también efímeras) y las muy grandes se descartan', () => {
-    expect(decidir(msg({ chat: '56911111111@s.whatsapp.net', fromMe: true, audio: true }), ctx())).toMatchObject({
-      reenviar: true,
-      contenido: { tipo: 'AUDIO', mime: 'audio/ogg; codecs=opus', bytes: 5000 },
-    });
+  it('las notas personales del chat consigo mismo no van al ERP: solo lo que empieza con «erp» y lo que sigue mientras está abierta', () => {
+    const propio = (texto: string, abierta = 0) => decidir(msg({ chat: '56911111111@s.whatsapp.net', fromMe: true, texto }), { ...ctx(), sesionPropiaHasta: abierta });
+    expect(propio('Comprar pan')).toEqual({ reenviar: false, motivo: 'NOTA_PERSONAL' });
+    expect(propio('erpetuo')).toEqual({ reenviar: false, motivo: 'NOTA_PERSONAL' });
+    expect(propio('erp')).toMatchObject({ reenviar: true, contenido: { texto: 'ayuda' }, sesion: 'ABRIR' });
+    expect(propio('VINCULAR 123456')).toMatchObject({ reenviar: true, contenido: { texto: 'VINCULAR 123456' } });
+    expect(propio('¿Y el mes pasado?', ahoraS + 60)).toMatchObject({ reenviar: true, contenido: { texto: '¿Y el mes pasado?' }, sesion: 'ABRIR' });
+    expect(propio('erp fin', ahoraS + 60)).toEqual({ reenviar: false, motivo: 'SESION_CERRADA', sesion: 'CERRAR' });
+    // Una nota de voz solo pasa con la conversación abierta.
+    const voz = (abierta: number) => decidir(msg({ chat: '56911111111@s.whatsapp.net', fromMe: true, audio: true }), { ...ctx(), sesionPropiaHasta: abierta });
+    expect(voz(0)).toEqual({ reenviar: false, motivo: 'NOTA_PERSONAL' });
+    expect(voz(ahoraS + 60)).toMatchObject({ reenviar: true, contenido: { tipo: 'AUDIO' } });
+  });
+
+  it('las notas de voz se reconocen (también efímeras); archivos de audio, sin largo o muy grandes se descartan', () => {
+    const contacto = (cambiar?: (a: Record<string, unknown>) => void) => {
+      const m = msg({ chat: '56922222222@s.whatsapp.net', audio: true });
+      cambiar?.((m.message as { audioMessage: Record<string, unknown> }).audioMessage);
+      return decidir(m, ctx('DEDICADO'));
+    };
+    expect(contacto()).toMatchObject({ reenviar: true, contenido: { tipo: 'AUDIO', mime: 'audio/ogg; codecs=opus', bytes: 5000, notaDeVoz: true } });
+    expect(contacto((a) => (a.ptt = false))).toEqual({ reenviar: false, motivo: 'AUDIO_NO_ES_NOTA_DE_VOZ' });
+    expect(contacto((a) => delete a.fileLength)).toEqual({ reenviar: false, motivo: 'AUDIO_SIN_LARGO' });
     expect(extraerContenido({ ephemeralMessage: { message: { extendedTextMessage: { text: ' hola ' } } } })).toEqual({ tipo: 'TEXTO', texto: 'hola' });
     expect(extraerContenido({ imageMessage: {} })).toBeNull();
-    const grande = msg({ chat: '56911111111@s.whatsapp.net', fromMe: true, audio: true });
-    (grande.message as { audioMessage: { fileLength: number } }).audioMessage.fileLength = 20 * 1024 * 1024;
-    expect(decidir(grande, ctx())).toEqual({ reenviar: false, motivo: 'AUDIO_GRANDE' });
+    expect(contacto((a) => (a.fileLength = 20 * 1024 * 1024))).toEqual({ reenviar: false, motivo: 'AUDIO_GRANDE' });
   });
 
   it('el ERP solo puede enviar al propio número y a los permitidos cuando el número es personal', () => {
@@ -84,5 +108,7 @@ describe('Puente WhatsApp (Baileys): qué se reenvía al ERP', () => {
     expect(c).toMatchObject({ modo: 'PERSONAL', host: '127.0.0.1', puerto: 3100, sesionDir: '/home/x/.erp-puente-whatsapp' });
     expect([...c.permitidos]).toEqual([CONTACTO]);
     expect(() => leerConfiguracion({ PUENTE_SECRETO: 'x'.repeat(40), PUENTE_NUMEROS_PERMITIDOS: '56922222222' })).toThrow(/inválido/u);
+    expect(() => leerConfiguracion({ PUENTE_SECRETO: 'x'.repeat(40), PUENTE_EDAD_MAXIMA_S: 'abc' })).toThrow(/entero positivo/u);
+    expect(leerConfiguracion({ PUENTE_SECRETO: 'x'.repeat(40), PUENTE_AUDIO_MAX_BYTES: '99999999' }).audioMaxBytes).toBe(8 * 1024 * 1024);
   });
 });

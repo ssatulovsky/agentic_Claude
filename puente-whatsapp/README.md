@@ -13,11 +13,18 @@ contrato firmado de `docs/decisiones/0009-canal-whatsapp.md`.
 
 | Modo | Uso | Qué se reenvía al ERP | A quién puede responder |
 | --- | --- | --- | --- |
-| `PERSONAL` (por omisión) | Pruebas con el número de una persona | Solo el chat consigo mismo («Tú», Mensajes a ti mismo) y los números de `PUENTE_NUMEROS_PERMITIDOS` | Solo a esos mismos |
+| `PERSONAL` (por omisión) | Pruebas con el número de una persona | En el chat consigo mismo («Tú»), solo lo que empieza con `erp` y lo que sigue mientras esa conversación está abierta; y los números de `PUENTE_NUMEROS_PERMITIDOS` | Solo a esos mismos |
 | `DEDICADO` | Número propio del ERP | Todo chat directo (el ERP decide quién está vinculado) | Cualquiera que el ERP indique |
 
 En modo `PERSONAL` los contactos personales del titular **nunca** llegan al ERP ni reciben
-respuestas. En el ERP conviene además `WHATSAPP_AVISAR_NO_VINCULADOS=false`.
+respuestas, y sus notas personales en «Tú» tampoco: solo lo que empieza con `erp`. Lo que se
+conversa con Meta AI se descarta siempre. En el ERP conviene además
+`WHATSAPP_AVISAR_NO_VINCULADOS=false`.
+
+**Conversación en «Tú»:** `erp ¿cuál es el saldo del banco?` abre la conversación; durante 10
+minutos desde el último mensaje, lo que escriba o las **notas de voz** que grabe van al ERP sin
+repetir `erp`. `erp fin` la cierra. Solo se aceptan notas de voz grabadas (no archivos de audio
+reenviados).
 
 ## Prueba con un número personal
 
@@ -43,8 +50,10 @@ respuestas. En el ERP conviene además `WHATSAPP_AVISAR_NO_VINCULADOS=false`.
 4. **Su cuenta del ERP** debe tener ese mismo número en «Teléfono de WhatsApp» (lo registra el
    administrador). En la web, página **WhatsApp**, presione «Vincular WhatsApp».
 5. En su teléfono abra el chat **«Tú» (Mensajes a ti mismo)** y envíe `VINCULAR 123456` con el
-   código de la web. Desde ahí, escriba o envíe notas de voz en ese mismo chat: responde el
-   agente con sus permisos. `ayuda` muestra los comandos.
+   código de la web.
+6. Escriba `erp hola` (o `erp ¿cuánto IVA pago en octubre?`) y, con la conversación abierta,
+   grabe una nota de voz. Responde el agente con sus permisos; a una nota de voz le antepone
+   «Entendí: …». `erp ayuda` muestra los comandos y `erp fin` cierra.
 
 ## Variables
 
@@ -58,6 +67,15 @@ respuestas. En el ERP conviene además `WHATSAPP_AVISAR_NO_VINCULADOS=false`.
 | `PUENTE_SESION_DIR` | `~/.erp-puente-whatsapp` | Sesión de WhatsApp: **es una credencial**; carpeta solo del dueño, fuera del repositorio y con respaldo cifrado |
 | `PUENTE_AUDIO_MAX_BYTES` | 8 MB | Notas de voz más grandes se ignoran |
 | `PUENTE_EDAD_MAXIMA_S` | 300 | Mensajes más antiguos (historial, desconexiones largas) se ignoran |
+| `PUENTE_PREFIJO` | `erp` | Palabra que abre la conversación en el chat consigo mismo |
+| `PUENTE_VENTANA_S` | 600 | Segundos que esa conversación queda abierta desde el último mensaje |
+
+## Dependencias
+
+Versiones fijas con `package-lock.json`. Baileys trae `libsignal` desde un commit de GitHub
+(sin hash de integridad de npm): `npm ci` necesita acceso a GitHub. La versión del protocolo de
+WhatsApp Web se consulta al conectar; si no responde, se usa la que trae la librería. La imagen
+de transcripción (`speaches`) es una versión candidata: conviene fijarla por digest al desplegar.
 
 ## Riesgos (decisión de gerencia, ver 0002)
 

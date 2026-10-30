@@ -84,7 +84,9 @@ personal de pruebas).
 El conector que ya se usaba (prototipo, WhatsApp Web con la librería Baileys) quedó como un
 proceso aparte, `puente-whatsapp/`, que implementa este contrato. Tiene un modo `PERSONAL`
 para probar con el número de una persona: solo atiende el chat consigo mismo y números
-permitidos, y nunca responde a sus contactos. Las notas de voz se descargan en el puente y se
+permitidos, y nunca responde a sus contactos. En el chat consigo mismo solo va al ERP lo que
+empieza con `erp` y lo que sigue mientras esa conversación está abierta (10 minutos), para no
+enviar las notas personales del titular; lo conversado con Meta AI se descarta. Las notas de voz se descargan en el puente y se
 transcriben en el ERP con Whisper local (`docker compose --profile voz`). Instrucciones en
 `puente-whatsapp/README.md`.
 
