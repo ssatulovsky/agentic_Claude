@@ -7,6 +7,7 @@ import type { DefinicionHerramienta, MensajeConversacion, ModeloIA, RespuestaMod
 import { crearServidor, NOMBRE_COOKIE } from '../src/api/servidor.js';
 import { cabecerasFirmadas, firmaValida } from '../src/canales/whatsapp/firma.js';
 import { partirTexto, PuenteHttp, type CanalMensajeria } from '../src/canales/whatsapp/puente.js';
+import { textoParaVoz } from '../src/canales/whatsapp/voz.js';
 import { TranscriptorCompatible, type Transcriptor } from '../src/canales/whatsapp/transcripcion.js';
 import { cargarConfiguracion } from '../src/config.js';
 import { ServicioWhatsapp } from '../src/canales/whatsapp/servicio.js';
@@ -23,13 +24,13 @@ const TEL_DESCONOCIDO = '+56999999999';
 
 let e: Escenario;
 let app: FastifyInstance;
-const enviados: Array<{ para: string; texto: string }> = [];
+const enviados: Array<{ para: string; texto: string; voz?: string }> = [];
 const alModelo: MensajeConversacion[][] = [];
 let transcripcion = 'cuál es el saldo del banco';
 
 const canal: CanalMensajeria = {
-  async enviar(para, texto) {
-    enviados.push({ para, texto });
+  async enviar(para, texto, opciones) {
+    enviados.push({ para, texto, ...(opciones?.voz ? { voz: opciones.voz } : {}) });
   },
 };
 const transcriptor: Transcriptor = {
@@ -162,6 +163,29 @@ describe('Puente firmado', () => {
     expect(llamadas.map((l) => l.url)).toEqual(['http://puente.local/enviar', 'http://puente.local/enviar']);
     expect(llamadas.every((l) => firmaValida(SECRETO, l.marca, l.firma, 'POST /enviar', l.cuerpo))).toBe(true);
     expect(partirTexto('x'.repeat(9000)).map((p) => p.length)).toEqual([4000, 4000, 1000]);
+  });
+
+  it('el texto para la voz no tiene formato, lee bien los montos y se acota', () => {
+    expect(textoParaVoz('*Saldo* al cierre: $790.000 ✅\n\n- Retiros: $2.991.000\n- Tasa: 0,25%\nVer https://erp.cl/x')).toBe(
+      'Saldo al cierre: 790000 pesos. Retiros: 2991000 pesos. Tasa: 0 coma 25%. Ver el enlace',
+    );
+    const largo = textoParaVoz('Una oración de prueba. '.repeat(100));
+    expect(largo.length).toBeLessThan(760);
+    expect(largo.endsWith('El detalle completo va por escrito.')).toBe(true);
+  });
+
+  it('la nota de voz viaja al puente solo con la última parte del texto', async () => {
+    const cuerpos: Array<Record<string, unknown>> = [];
+    const puente = new PuenteHttp({
+      url: 'http://puente.local',
+      secreto: SECRETO,
+      fetch: (async (_u: string, init: RequestInit) => {
+        cuerpos.push(JSON.parse(init.body as string) as Record<string, unknown>);
+        return new Response('{}', { status: 200 });
+      }) as unknown as typeof fetch,
+    });
+    await puente.enviar(TEL_CONTADOR, `${'a'.repeat(3000)}\n${'b'.repeat(3000)}`, { voz: 'hola' });
+    expect(cuerpos.map((c) => c.voz)).toEqual([undefined, 'hola']);
   });
 
   it('el transcriptor usa la API compatible con Whisper', async () => {
@@ -316,6 +340,29 @@ describe('Conversación por WhatsApp', () => {
     // Uno reciente (todavía en proceso) no se duplica.
     await e.owner.query(`INSERT INTO mensajes_whatsapp (id_externo, telefono, tipo) VALUES ('en-proceso-1', $1, 'TEXTO')`, [TEL_CONTADOR]);
     expect((await escribir(TEL_CONTADOR, 'ayuda', 'en-proceso-1')).json()).toEqual({ aceptado: false, motivo: 'DUPLICADO' });
+  });
+
+  it('responde con nota de voz según la preferencia: por omisión, cuando se preguntó con voz', async () => {
+    const ultimo = () => enviados.filter((x) => x.para === TEL_CONTADOR).at(-1)!;
+    transcripcion = 'cuál es el saldo del banco';
+    await recibir(TEL_CONTADOR, { tipo: 'AUDIO', audio: { base64: Buffer.from('OggS').toString('base64'), mime: 'audio/ogg; codecs=opus' } });
+    expect(ultimo().voz).toBe('Respuesta a: cuál es el saldo del banco');
+    await escribir(TEL_CONTADOR, '¿Y el mes pasado?');
+    expect(ultimo().voz).toBeUndefined();
+    await escribir(TEL_CONTADOR, 'voz siempre');
+    expect(ultimo()).toEqual({ para: TEL_CONTADOR, texto: 'Listo: le responderé siempre también con nota de voz.' });
+    await escribir(TEL_CONTADOR, '¿Saldo?');
+    expect(ultimo().voz).toBe('Respuesta a: ¿Saldo?');
+    // Los comandos nunca van con voz; y desde la web se puede volver a "solo texto".
+    await escribir(TEL_CONTADOR, 'ayuda');
+    expect(ultimo().voz).toBeUndefined();
+    const c = await ingresar(e.usuarios.contadorA1);
+    expect((await app.inject({ method: 'POST', url: '/api/yo/whatsapp/voz', cookies: c, payload: { voz: 'NUNCA' } })).statusCode).toBe(200);
+    expect((await app.inject({ method: 'GET', url: '/api/yo/whatsapp', cookies: c })).json().vinculo.voz).toBe('NUNCA');
+    await recibir(TEL_CONTADOR, { tipo: 'AUDIO', audio: { base64: Buffer.from('OggS').toString('base64'), mime: 'audio/ogg; codecs=opus' } });
+    expect(ultimo().voz).toBeUndefined();
+    expect((await app.inject({ method: 'POST', url: '/api/yo/whatsapp/voz', cookies: c, payload: { voz: 'A_VECES' } })).statusCode).toBe(422);
+    await app.inject({ method: 'POST', url: '/api/yo/whatsapp/voz', cookies: c, payload: { voz: 'SI_ENVIA_VOZ' } });
   });
 
   it('los grupos no se atienden', async () => {

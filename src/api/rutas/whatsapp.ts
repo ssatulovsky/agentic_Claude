@@ -80,7 +80,7 @@ export async function rutasWhatsapp(app: FastifyInstance, deps: Dependencias, se
 
     web.get('/yo/whatsapp', async (req) =>
       enContexto(deps.db, contextoDeUsuario(req.sesion!.usuarioId), async (trx) => {
-        const { rows } = await sql<{ telefono: string; estado: string; verificado_en: Date | null; vence_en: Date | null; codigo_vence_en: Date | null }>`
+        const { rows } = await sql<{ telefono: string; estado: string; verificado_en: Date | null; vence_en: Date | null; codigo_vence_en: Date | null; voz: string }>`
           SELECT * FROM whatsapp_mi_vinculo()`.execute(trx);
         const { rows: u } = await sql<{ telefono_whatsapp: string | null }>`
           SELECT telefono_whatsapp FROM usuarios WHERE id = ${req.sesion!.usuarioId}::uuid`.execute(trx);
@@ -107,6 +107,12 @@ export async function rutasWhatsapp(app: FastifyInstance, deps: Dependencias, se
         instruccion: `Desde ${tel}, envíe por WhatsApp el mensaje: VINCULAR ${codigo}`,
         venceEnMinutos: 10,
       };
+    });
+
+    web.post('/yo/whatsapp/voz', async (req) => {
+      const { voz } = validar(z.object({ voz: z.enum(['NUNCA', 'SI_ENVIA_VOZ', 'SIEMPRE']) }), req.body);
+      await enContexto(deps.db, contextoDeUsuario(req.sesion!.usuarioId), (trx) => sql`SELECT whatsapp_preferir_voz(${voz})`.execute(trx));
+      return { voz };
     });
 
     web.post('/yo/whatsapp/desvincular', async (req) => {

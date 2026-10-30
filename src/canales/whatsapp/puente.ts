@@ -5,7 +5,8 @@ import { cabecerasFirmadas } from './firma.js';
  * WhatsApp; pasar a la API oficial de Meta es escribir otra implementación de esta interfaz.
  */
 export interface CanalMensajeria {
-  enviar(telefono: string, texto: string): Promise<void>;
+  /** `voz`: texto para decir además en una nota de voz (el texto escrito va siempre). */
+  enviar(telefono: string, texto: string, opciones?: { voz?: string }): Promise<void>;
 }
 
 /** Largo máximo de un mensaje de WhatsApp (con margen). */
@@ -32,9 +33,12 @@ export class PuenteHttp implements CanalMensajeria {
     private readonly opciones: { url: string; secreto: string; timeoutMs?: number; fetch?: typeof fetch },
   ) {}
 
-  async enviar(telefono: string, texto: string): Promise<void> {
-    for (const parte of partirTexto(texto)) {
-      const cuerpo = JSON.stringify({ para: telefono, texto: parte });
+  async enviar(telefono: string, texto: string, opciones: { voz?: string } = {}): Promise<void> {
+    const partes = partirTexto(texto);
+    for (const [i, parte] of partes.entries()) {
+      // La nota de voz acompaña la última parte del texto.
+      const voz = i === partes.length - 1 && opciones.voz ? { voz: opciones.voz } : {};
+      const cuerpo = JSON.stringify({ para: telefono, texto: parte, ...voz });
       const r = await (this.opciones.fetch ?? fetch)(`${this.opciones.url.replace(/\/$/u, '')}/enviar`, {
         method: 'POST',
         headers: { 'content-type': 'application/json', ...cabecerasFirmadas(this.opciones.secreto, 'POST /enviar', cuerpo) },
