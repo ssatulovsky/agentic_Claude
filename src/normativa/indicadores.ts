@@ -1,18 +1,19 @@
 import type pg from 'pg';
 
 /**
- * Sincronización de UF y UTM desde fuentes oficiales o que las reproducen.
+ * Sincronización de UF, UTM y dólar observado desde fuentes oficiales o que las reproducen.
  *
  * Reglas:
  *   * Con más de una fuente, un valor solo se guarda si todas las fuentes que lo
  *     publican coinciden al centavo. Una diferencia se informa y NO se guarda.
  *   * Un valor ya guardado nunca se sobrescribe: si una fuente publica otro valor
  *     para la misma fecha, se informa como conflicto para revisión humana.
- *   * Se rechazan variaciones inverosímiles (UF > 1% diario, UTM > 3% mensual).
+ *   * Se rechazan variaciones inverosímiles (UF > 1% diario, UTM > 3% mensual, dólar > 5% diario).
  *   * La UTA del mes se calcula como 12 veces la UTM del mes.
  */
 
-export type TipoSincronizable = 'UF' | 'UTM';
+/** DOLAR: dólar observado (Banco Central), diario; se usa para expresar en pesos los costos de IA. */
+export type TipoSincronizable = 'UF' | 'UTM' | 'DOLAR';
 
 export interface ValorIndicador {
   tipo: TipoSincronizable;
@@ -88,7 +89,7 @@ export class FuenteMindicador implements FuenteIndicadores {
 
 /**
  * API de la Comisión para el Mercado Financiero (requiere clave gratuita).
- * Formato esperado: {"UFs":[{"Valor":"41.247,63","Fecha":"2026-10-31"}]} y {"UTMs":[...]}.
+ * Formato esperado: {"UFs":[{"Valor":"41.247,63","Fecha":"2026-10-31"}]}, {"UTMs":[...]} y {"Dolares":[...]}.
  * Pendiente: confirmar el formato con una clave real antes de usarla en producción.
  */
 export class FuenteCmf implements FuenteIndicadores {
@@ -104,8 +105,9 @@ export class FuenteCmf implements FuenteIndicadores {
 
   async obtener(tipo: TipoSincronizable, anio: number): Promise<ValorIndicador[]> {
     const datos = (await descargarJson(this.descargar, this.url(tipo, anio))) as Record<string, { Valor: string; Fecha: string }[]>;
-    const lista = datos[tipo === 'UF' ? 'UFs' : 'UTMs'];
-    if (!Array.isArray(lista)) throw new Error(`Respuesta sin "${tipo === 'UF' ? 'UFs' : 'UTMs'}"`);
+    const clave = { UF: 'UFs', UTM: 'UTMs', DOLAR: 'Dolares' }[tipo];
+    const lista = datos[clave];
+    if (!Array.isArray(lista)) throw new Error(`Respuesta sin "${clave}"`);
     return sinDuplicados(
       lista.map((x) => {
         if (!/^\d{4}-\d{2}-\d{2}$/u.test(x.Fecha)) throw new Error(`Fecha inválida: ${x.Fecha}`);
@@ -131,9 +133,9 @@ export interface ResumenSincronizacion {
 }
 
 /** Variación máxima aceptada por unidad de distancia: UF por día, UTM por mes. */
-const VARIACION_MAXIMA: Record<TipoSincronizable, number> = { UF: 0.01, UTM: 0.03 };
+const VARIACION_MAXIMA: Record<TipoSincronizable, number> = { UF: 0.01, UTM: 0.03, DOLAR: 0.05 };
 /** Distancia máxima para que un valor guardado sirva de referencia: 45 días (UF) o 3 meses (UTM). */
-const DISTANCIA_REFERENCIA: Record<TipoSincronizable, number> = { UF: 45, UTM: 3 };
+const DISTANCIA_REFERENCIA: Record<TipoSincronizable, number> = { UF: 45, UTM: 3, DOLAR: 15 };
 
 function distancia(tipo: TipoSincronizable, a: string, b: string): number {
   if (tipo === 'UTM') {

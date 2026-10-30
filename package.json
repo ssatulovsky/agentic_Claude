@@ -14,7 +14,8 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "cli:verificar-bitacora": "tsx src/cli/verificarBitacora.ts",
-    "cli:sincronizar-indicadores": "tsx src/cli/sincronizarIndicadores.ts"
+    "cli:sincronizar-indicadores": "tsx src/cli/sincronizarIndicadores.ts",
+    "cli:ia": "tsx src/cli/iaPlataforma.ts"
   },
   "license": "UNLICENSED",
   "dependencies": {

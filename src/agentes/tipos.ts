@@ -80,7 +80,15 @@ export type MensajeConversacion =
   | { rol: 'asistente'; texto?: string; llamadas?: LlamadaHerramienta[] }
   | { rol: 'herramienta'; llamadaId: string; resultado: ResultadoHerramienta };
 
-export type RespuestaModelo = { tipo: 'texto'; texto: string } | { tipo: 'herramientas'; llamadas: LlamadaHerramienta[] };
+/** Tokens consumidos en una respuesta (los informa el proveedor). */
+export interface UsoModelo {
+  tokensEntrada: number;
+  tokensSalida: number;
+}
+
+export type RespuestaModelo = ({ tipo: 'texto'; texto: string } | { tipo: 'herramientas'; llamadas: LlamadaHerramienta[] }) & {
+  uso?: UsoModelo;
+};
 
 /** Cualquier proveedor (Claude, Gemini, un modelo local) se conecta implementando esta interfaz. */
 export interface ModeloIA {
@@ -88,5 +96,7 @@ export interface ModeloIA {
     instrucciones: string;
     mensajes: MensajeConversacion[];
     herramientas: EspecificacionHerramienta[];
+    /** Corta la llamada si vence el plazo total de la conversación. */
+    senal?: AbortSignal;
   }): Promise<RespuestaModelo>;
 }

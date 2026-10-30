@@ -1,17 +1,19 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, ErrorApi, type Empresa, type Yo } from './api';
+import { Asistentes } from './paginas/Asistentes';
 import { Ingreso } from './paginas/Ingreso';
 import { Parametrizacion } from './paginas/Parametrizacion';
 import { ReglasConciliacion } from './paginas/ReglasConciliacion';
+import { UsoIa } from './paginas/UsoIa';
 
-type Pagina = 'parametrizacion' | 'reglas';
+type Pagina = 'asistentes' | 'parametrizacion' | 'reglas' | 'ia';
 
 export function App() {
   const [yo, setYo] = useState<Yo | null>(null);
   const [cargando, setCargando] = useState(true);
   const [empresa, setEmpresa] = useState<Empresa | null>(null);
   const [permisos, setPermisos] = useState<Set<string>>(new Set());
-  const [pagina, setPagina] = useState<Pagina>('parametrizacion');
+  const [pagina, setPagina] = useState<Pagina>('asistentes');
 
   const cargarYo = useCallback(async () => {
     try {
@@ -65,11 +67,17 @@ export function App() {
       <header className="barra">
         <strong className="marca">ERP Agéntico</strong>
         <nav>
+          <button className={pagina === 'asistentes' ? 'activo' : ''} onClick={() => setPagina('asistentes')}>
+            Asistentes
+          </button>
           <button className={pagina === 'parametrizacion' ? 'activo' : ''} onClick={() => setPagina('parametrizacion')}>
             Parametrización contable
           </button>
           <button className={pagina === 'reglas' ? 'activo' : ''} onClick={() => setPagina('reglas')}>
             Reglas de conciliación
+          </button>
+          <button className={pagina === 'ia' ? 'activo' : ''} onClick={() => setPagina('ia')}>
+            IA
           </button>
         </nav>
         <div className="sesion">
@@ -100,6 +108,10 @@ export function App() {
       <main>
         {!empresa ? (
           <p>No tiene empresas asignadas.</p>
+        ) : pagina === 'asistentes' ? (
+          <Asistentes key={empresa.id} empresa={empresa} />
+        ) : pagina === 'ia' ? (
+          <UsoIa key={empresa.id} empresa={empresa} />
         ) : pagina === 'parametrizacion' ? (
           <Parametrizacion key={empresa.id} empresa={empresa} puedeEditar={permisos.has('contabilidad.plan_cuentas.editar')} />
         ) : (

@@ -33,6 +33,15 @@ const esquema = z.object({
   MFA_EMISOR: z.string().min(1).default('ERP Agentico'),
   /** Carpeta de la interfaz web compilada; por defecto dist-web en el directorio de trabajo. */
   DIRECTORIO_WEB: z.string().min(1).optional(),
+  /** Proveedores de IA. Sin clave o sin URL, ese proveedor se salta y la cadena sigue con el siguiente. */
+  ANTHROPIC_API_KEY: z.string().min(10).optional(),
+  GEMINI_API_KEY: z.string().min(10).optional(),
+  OLLAMA_URL: z.url().optional(),
+  OLLAMA_MODELO: z.string().min(1).optional(),
+  /** Tiempo máximo de espera por respuesta de un modelo. */
+  IA_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(300_000).default(60_000),
+  // Plazo total de una consulta a un agente (todos los pasos y modelos de respaldo).
+  IA_PLAZO_CONVERSACION_MS: z.coerce.number().int().min(5_000).max(600_000).default(120_000),
 });
 
 export type Configuracion = z.infer<typeof esquema>;

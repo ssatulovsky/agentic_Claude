@@ -2,7 +2,7 @@ import pg from 'pg';
 import { FuenteCmf, FuenteMindicador, sincronizarIndicadores, type FuenteIndicadores } from '../normativa/indicadores.js';
 
 /**
- * Sincronización diaria de UF y UTM (operación de plataforma).
+ * Sincronización diaria de UF, UTM y dólar observado (operación de plataforma).
  * Programarla una vez al día en el servidor, por ejemplo con cron a las 08:15:
  *   15 8 * * *  cd /opt/erp && npm run -s cli:sincronizar-indicadores >> /var/log/erp/indicadores.log 2>&1
  *
@@ -24,10 +24,11 @@ async function main(): Promise<void> {
   const cliente = new pg.Client({ connectionString: url, options: '-c TimeZone=UTC' });
   await cliente.connect();
   try {
-    const r = await sincronizarIndicadores(cliente, fuentes, anios);
+    const tipos = ['UF', 'UTM', 'DOLAR'] as const;
+    const r = await sincronizarIndicadores(cliente, fuentes, anios, [...tipos]);
     console.log(JSON.stringify({ fecha: new Date().toISOString(), ...r }, null, 2));
     if (r.discrepancias.length || r.conflictos.length || r.rechazados.length || r.sinConfirmar.length) process.exitCode = 2;
-    if (r.erroresFuente.length === fuentes.length * anios.length * 2) process.exitCode = 1;
+    if (r.erroresFuente.length === fuentes.length * anios.length * 3) process.exitCode = 1;
   } finally {
     await cliente.end();
   }
