@@ -31,6 +31,8 @@ export function traducirErrorBaseDatos(error: unknown): ErrorNegocio | null {
       return new ErrorNegocio('SUPERPOSICION', 'El período se superpone con uno existente.', 409);
     case '23514':
       return new ErrorNegocio('DATO_INVALIDO', e.message ?? 'Dato inválido.', 422);
+    case '23502':
+      return new ErrorNegocio('DATO_FALTANTE', 'Falta un dato obligatorio.', 422);
     case '23503':
       return new ErrorNegocio('REFERENCIA_INVALIDA', e.message ?? 'Referencia inválida.', 422);
     case '22P02':

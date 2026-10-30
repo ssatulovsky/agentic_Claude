@@ -352,6 +352,36 @@ describe('Datos por empresa a través de la API', () => {
     expect(mayor.json().saldoFinal).toBe('250000.00');
   });
 
+  it('tributario: importa el RCV por la API cuando el módulo está contratado', async () => {
+    const c = { [NOMBRE_COOKIE]: cookieContador };
+    const base = `/api/empresas/${e.empresaA1}`;
+    const csv = `Tipo Doc;Tipo Venta;Rut cliente;Folio;Fecha Docto;Monto Neto;Monto IVA;Monto total\n33;Del Giro;76104550-4;1;01/06/2026;1000;190;1190`;
+    const payload = { libro: 'VENTA', anio: 2026, mes: 6, archivoNombre: 'ventas.csv', contenido: csv };
+    const sinModulo = await app.inject({ method: 'POST', url: `${base}/rcv/importaciones`, cookies: c, payload });
+    expect(sinModulo.statusCode).toBe(422);
+    expect(sinModulo.json().error.mensaje).toMatch(/módulo Tributario/u);
+    await e.owner.query(
+      `INSERT INTO suscripciones_modulo (empresa_id, modulo_codigo, pagador, vigente_desde) VALUES ($1, 'TRIBUTARIO', 'EMPRESA', '2026-01-01')`,
+      [e.empresaA1],
+    );
+    const ok = await app.inject({ method: 'POST', url: `${base}/rcv/importaciones`, cookies: c, payload });
+    expect(ok.statusCode).toBe(201);
+    expect(ok.json()).toMatchObject({ cantidad_documentos: 1, total_iva: '190' });
+    const malo = await app.inject({
+      method: 'POST',
+      url: `${base}/rcv/importaciones`,
+      cookies: c,
+      payload: { ...payload, contenido: csv.replace('76104550-4', '76104550-9') },
+    });
+    expect(malo.statusCode).toBe(422);
+    expect(malo.json().error).toMatchObject({ codigo: 'RCV_DATOS' });
+    const resumen = await app.inject({ method: 'GET', url: `${base}/rcv?anio=2026&mes=6`, cookies: c });
+    expect(resumen.json().importaciones).toHaveLength(1);
+    const f29 = await app.inject({ method: 'POST', url: `${base}/f29`, cookies: c, payload: { anio: 2026, mes: 6, remanenteAnterior: 0 } });
+    expect(f29.statusCode).toBe(422);
+    expect(f29.json().error.mensaje).toMatch(/Falta importar el registro de compras/u);
+  });
+
   it('la cadena de la bitácora sigue íntegra después de todo lo anterior', async () => {
     const { rows } = await e.owner.query<{ alterado: string | null }>('SELECT bitacora_verificar() AS alterado');
     expect(rows[0]!.alterado).toBeNull();
