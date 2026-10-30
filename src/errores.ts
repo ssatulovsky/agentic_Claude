@@ -31,8 +31,14 @@ export function traducirErrorBaseDatos(error: unknown): ErrorNegocio | null {
       return new ErrorNegocio('SUPERPOSICION', 'El período se superpone con uno existente.', 409);
     case '23514':
       return new ErrorNegocio('DATO_INVALIDO', e.message ?? 'Dato inválido.', 422);
+    case '23502':
+      return new ErrorNegocio('DATO_FALTANTE', 'Falta un dato obligatorio.', 422);
     case '23503':
       return new ErrorNegocio('REFERENCIA_INVALIDA', e.message ?? 'Referencia inválida.', 422);
+    case '22003':
+      return new ErrorNegocio('MONTO_FUERA_DE_RANGO', 'Un monto excede el máximo permitido.', 422);
+    case '57014':
+      return new ErrorNegocio('OPERACION_LENTA', 'La operación tardó demasiado. Intente con un archivo más pequeño o más tarde.', 503);
     case '22P02':
       return new ErrorNegocio('FORMATO_INVALIDO', 'Formato de dato inválido.', 422);
     default:

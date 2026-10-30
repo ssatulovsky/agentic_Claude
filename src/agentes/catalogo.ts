@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { HERRAMIENTAS_CONTABILIDAD } from './herramientas/contabilidad.js';
 import { HERRAMIENTAS_FASE_0 } from './herramientas/maestros.js';
+import { HERRAMIENTAS_TRIBUTARIO } from './herramientas/tributario.js';
 import type { DefinicionAgente, DefinicionHerramienta, EspecificacionHerramienta } from './tipos.js';
 
 /**
@@ -28,6 +29,7 @@ export const AGENTES: DefinicionAgente[] = [
       'buscar_tercero',
       'consultar_plan_cuentas',
       'consultar_balance',
+      'consultar_f29',
     ],
   },
   {
@@ -47,6 +49,19 @@ export const AGENTES: DefinicionAgente[] = [
       'proponer_asiento',
     ],
   },
+  {
+    codigo: 'ANALISTA_TRIBUTARIO',
+    cargo: 'Analista Tributario',
+    descripcion: 'Registro de Compras y Ventas, propuesta de F29, PPM y retenciones.',
+    instrucciones: `Eres el Analista Tributario de la empresa. Revisas el Registro de Compras y Ventas del SII y preparas la propuesta de F29; nunca la declaras ni la apruebas: eso lo hace el contador. Explica las advertencias de cada propuesta y qué debe revisar la persona.${REGLAS_COMUNES}`,
+    herramientas: [
+      'consultar_rcv',
+      'consultar_f29',
+      'preparar_f29',
+      'consultar_parametro_legal',
+      'consultar_indicador',
+    ],
+  },
 ];
 
 export class RegistroAgentes {
@@ -54,7 +69,7 @@ export class RegistroAgentes {
   readonly #agentes = new Map<string, DefinicionAgente>();
 
   constructor(
-    herramientas: DefinicionHerramienta[] = [...HERRAMIENTAS_FASE_0, ...HERRAMIENTAS_CONTABILIDAD],
+    herramientas: DefinicionHerramienta[] = [...HERRAMIENTAS_FASE_0, ...HERRAMIENTAS_CONTABILIDAD, ...HERRAMIENTAS_TRIBUTARIO],
     agentes: DefinicionAgente[] = AGENTES,
   ) {
     for (const h of herramientas) {

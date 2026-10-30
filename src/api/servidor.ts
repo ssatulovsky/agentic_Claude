@@ -11,6 +11,7 @@ import { rutasAdministracion } from './rutas/administracion.js';
 import { rutasAgentes } from './rutas/agentes.js';
 import { rutasAutenticacion } from './rutas/autenticacion.js';
 import { rutasContabilidad } from './rutas/contabilidad.js';
+import { rutasTributario } from './rutas/tributario.js';
 import { rutasMaestros } from './rutas/maestros.js';
 import { rutasNormativaYBitacora } from './rutas/normativa.js';
 
@@ -136,6 +137,7 @@ export async function crearServidor(deps: Dependencias): Promise<FastifyInstance
   await app.register(async (r) => rutasNormativaYBitacora(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasAgentes(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasContabilidad(r, deps), { prefix: '/api' });
+  await app.register(async (r) => rutasTributario(r, deps), { prefix: '/api' });
 
   return app;
 }
