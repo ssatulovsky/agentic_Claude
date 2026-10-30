@@ -61,12 +61,12 @@ async function ingresar(u: UsuarioPrueba) {
 
 let contador = 0;
 /** Envía un mensaje firmado como lo haría el puente y espera a que el ERP responda. */
-async function recibir(de: string, cuerpo: Record<string, unknown>, opciones: { id?: string; secreto?: string; marca?: number } = {}) {
+async function recibir(de: string, cuerpo: Record<string, unknown>, opciones: { id?: string; secreto?: string; marca?: number; destino?: string } = {}) {
   const payload = JSON.stringify({ id: opciones.id ?? `msg-${++contador}`, de, ...cuerpo });
   const r = await app.inject({
     method: 'POST',
     url: '/api/canales/whatsapp/mensajes',
-    headers: { 'content-type': 'application/json', ...cabecerasFirmadas(opciones.secreto ?? SECRETO, payload, opciones.marca) },
+    headers: { 'content-type': 'application/json', ...cabecerasFirmadas(opciones.secreto ?? SECRETO, opciones.destino ?? 'POST /api/canales/whatsapp/mensajes', payload, opciones.marca) },
     payload,
   });
   await app.canalWhatsapp!.esperarPendientes();
@@ -108,14 +108,42 @@ afterAll(async () => {
 describe('Puente firmado', () => {
   it('verifica la firma HMAC y rechaza firmas ajenas o antiguas', async () => {
     const cuerpo = '{"a":1}';
-    const h = cabecerasFirmadas(SECRETO, cuerpo);
-    expect(firmaValida(SECRETO, h['x-erp-marca-tiempo'], h['x-erp-firma'], cuerpo)).toBe(true);
-    expect(firmaValida(SECRETO, h['x-erp-marca-tiempo'], h['x-erp-firma'], '{"a":2}')).toBe(false);
+    const h = cabecerasFirmadas(SECRETO, 'POST /x', cuerpo);
+    expect(firmaValida(SECRETO, h['x-erp-marca-tiempo'], h['x-erp-firma'], 'POST /x', cuerpo)).toBe(true);
+    expect(firmaValida(SECRETO, h['x-erp-marca-tiempo'], h['x-erp-firma'], 'POST /x', '{"a":2}')).toBe(false);
+    // Una firma de un sentido (ERP → puente) no sirve en el otro.
+    expect(firmaValida(SECRETO, h['x-erp-marca-tiempo'], h['x-erp-firma'], 'POST /y', cuerpo)).toBe(false);
+    expect((await recibir(TEL_DESCONOCIDO, { tipo: 'TEXTO', texto: 'hola' }, { destino: 'POST /enviar' })).statusCode).toBe(401);
     expect((await recibir(TEL_DESCONOCIDO, { tipo: 'TEXTO', texto: 'hola' }, { secreto: 'otro-secreto-que-no-es-el-del-puente!!' })).statusCode).toBe(401);
     expect((await recibir(TEL_DESCONOCIDO, { tipo: 'TEXTO', texto: 'hola' }, { marca: Date.now() - 10 * 60_000 })).statusCode).toBe(401);
     const sinFirma = await app.inject({ method: 'POST', url: '/api/canales/whatsapp/mensajes', payload: { id: 'x', de: TEL_DESCONOCIDO, tipo: 'TEXTO', texto: 'hola' } });
     expect(sinFirma.statusCode).toBe(401);
     expect(enviados).toEqual([]);
+  });
+
+  it('un cuerpo grande sin firma se rechaza antes de leerlo, y el latido acepta solo cuerpos pequeños', async () => {
+    const grande = await app.inject({
+      method: 'POST',
+      url: '/api/canales/whatsapp/mensajes',
+      headers: { 'content-type': 'application/json' },
+      payload: JSON.stringify({ relleno: 'x'.repeat(2_000_000) }),
+    });
+    expect(grande.statusCode).toBe(401);
+    const payload = JSON.stringify({ estado: 'CONECTADO', detalle: 'x'.repeat(5000) });
+    const latido = await app.inject({
+      method: 'POST',
+      url: '/api/canales/whatsapp/latido',
+      headers: { 'content-type': 'application/json', ...cabecerasFirmadas(SECRETO, 'POST /api/canales/whatsapp/latido', payload) },
+      payload,
+    });
+    expect(latido.statusCode).toBe(413);
+  });
+
+  it('la transcripción debe ser local salvo autorización expresa', () => {
+    const base = { DATABASE_URL: 'postgres://a@b/c', DATABASE_URL_AUTH: 'postgres://a@b/c', CLAVE_MAESTRA_CIFRADO: CLAVE_PRUEBAS };
+    expect(() => cargarConfiguracion({ ...base, TRANSCRIPCION_URL: 'https://api.ejemplo.com' })).toThrow(/servicio externo/u);
+    expect(cargarConfiguracion({ ...base, TRANSCRIPCION_URL: 'https://api.ejemplo.com', TRANSCRIPCION_EXTERNA_AUTORIZADA: 'true' }).TRANSCRIPCION_URL).toBeDefined();
+    expect(cargarConfiguracion({ ...base, TRANSCRIPCION_URL: 'http://whisper:8000' }).TRANSCRIPCION_URL).toBeDefined();
   });
 
   it('el envío al puente va firmado y los textos largos se parten', async () => {
@@ -131,7 +159,7 @@ describe('Puente firmado', () => {
     });
     await puente.enviar(TEL_CONTADOR, `${'a'.repeat(3000)}\n${'b'.repeat(3000)}`);
     expect(llamadas.map((l) => l.url)).toEqual(['http://puente.local/enviar', 'http://puente.local/enviar']);
-    expect(llamadas.every((l) => firmaValida(SECRETO, l.marca, l.firma, l.cuerpo))).toBe(true);
+    expect(llamadas.every((l) => firmaValida(SECRETO, l.marca, l.firma, 'POST /enviar', l.cuerpo))).toBe(true);
     expect(partirTexto('x'.repeat(9000)).map((p) => p.length)).toEqual([4000, 4000, 1000]);
   });
 
@@ -180,13 +208,22 @@ describe('Vinculación del teléfono', () => {
     expect(rows.map((r: { accion: string }) => r.accion)).toEqual(['WHATSAPP_VINCULACION_INICIADA', 'WHATSAPP_VINCULADO']);
   });
 
+  it('los intentos de vinculación fallidos reciben a lo más tres respuestas por hora', async () => {
+    const tel = '+56988888888';
+    for (let i = 0; i < 4; i++) await escribir(tel, 'VINCULAR 000000');
+    expect(enviados.filter((x) => x.para === tel)).toHaveLength(3);
+  });
+
   it('el código vence tras cinco intentos fallidos', async () => {
     const c = await ingresar(e.usuarios.gerenteA1);
     const { codigo } = (await app.inject({ method: 'POST', url: '/api/yo/whatsapp/vincular', cookies: c, headers: { 'x-erp-solicitud': '1' } })).json() as { codigo: string };
     const errado = codigo === '000000' ? '111111' : '000000';
     for (let i = 0; i < 5; i++) await escribir(TEL_GERENTE, `VINCULAR ${errado}`);
-    await escribir(TEL_GERENTE, `VINCULAR ${codigo}`);
-    expect(ultimaRespuesta(TEL_GERENTE)).toMatch(/venció o tuvo demasiados intentos/u);
+    await escribir(TEL_GERENTE, `VINCULAR ${codigo}`, 'gerente-correcto');
+    // (Las respuestas a intentos fallidos se limitan; el resultado queda registrado.)
+    const { rows } = await e.owner.query(`SELECT detalle FROM mensajes_whatsapp WHERE id_externo = 'gerente-correcto'`);
+    expect(rows[0]).toEqual({ detalle: 'VINCULAR:CODIGO_VENCIDO' });
+    expect((await app.inject({ method: 'GET', url: '/api/yo/whatsapp', cookies: c })).json().vinculo.estado).toBe('PENDIENTE');
   });
 });
 
@@ -248,6 +285,19 @@ describe('Conversación por WhatsApp', () => {
     expect(ultimaRespuesta(TEL_CONTADOR)).toMatch(/No pude leer ese audio/u);
   });
 
+  it('un mensaje que quedó a medias (reinicio del servidor) se reprocesa cuando el conector lo reenvía', async () => {
+    await e.owner.query(
+      `INSERT INTO mensajes_whatsapp (id_externo, telefono, tipo, recibido_en) VALUES ('atascado-1', $1, 'TEXTO', now() - interval '20 minutes')`,
+      [TEL_CONTADOR],
+    );
+    const r = await escribir(TEL_CONTADOR, 'ayuda', 'atascado-1');
+    expect(r.json()).toEqual({ aceptado: true });
+    expect(ultimaRespuesta(TEL_CONTADOR)).toMatch(/Comandos/u);
+    // Uno reciente (todavía en proceso) no se duplica.
+    await e.owner.query(`INSERT INTO mensajes_whatsapp (id_externo, telefono, tipo) VALUES ('en-proceso-1', $1, 'TEXTO')`, [TEL_CONTADOR]);
+    expect((await escribir(TEL_CONTADOR, 'ayuda', 'en-proceso-1')).json()).toEqual({ aceptado: false, motivo: 'DUPLICADO' });
+  });
+
   it('los grupos no se atienden', async () => {
     const antes = enviados.length;
     const r = await recibir(TEL_CONTADOR, { tipo: 'TEXTO', texto: 'hola grupo', esGrupo: true });
@@ -270,6 +320,19 @@ describe('Conversación por WhatsApp', () => {
     expect(ultimaRespuesta(TEL_CONTADOR)).toMatch(/quedó desvinculado/u);
     const estado = await app.inject({ method: 'GET', url: '/api/yo/whatsapp', cookies: c });
     expect(estado.json().vinculo.estado).toBe('REVOCADO');
+  });
+
+  it('un cambio de contraseña o de doble factor revoca el vínculo', async () => {
+    const c = await ingresar(e.usuarios.contadorA1);
+    const vincular = async () => {
+      const { codigo } = (await app.inject({ method: 'POST', url: '/api/yo/whatsapp/vincular', cookies: c, headers: { 'x-erp-solicitud': '1' } })).json() as { codigo: string };
+      await escribir(TEL_CONTADOR, `VINCULAR ${codigo}`);
+      expect(ultimaRespuesta(TEL_CONTADOR)).toMatch(/quedó vinculado/u);
+    };
+    const estado = async () => (await app.inject({ method: 'GET', url: '/api/yo/whatsapp', cookies: c })).json().vinculo.estado as string;
+    await vincular();
+    await e.owner.query(`UPDATE usuarios SET password_hash = '$argon2id$otro' WHERE id = $1`, [e.usuarios.contadorA1.id]);
+    expect(await estado()).toBe('REVOCADO');
   });
 });
 
@@ -308,17 +371,21 @@ describe('Acciones y estado del canal', () => {
       return app.inject({
         method: 'POST',
         url: '/api/canales/whatsapp/latido',
-        headers: { 'content-type': 'application/json', ...cabecerasFirmadas(SECRETO, payload) },
+        headers: { 'content-type': 'application/json', ...cabecerasFirmadas(SECRETO, 'POST /api/canales/whatsapp/latido', payload) },
         payload,
       });
     };
     expect((await latido('CONECTADO')).statusCode).toBe(200);
     const admin = await ingresar(e.usuarios.adminA);
-    expect((await app.inject({ method: 'GET', url: '/api/canales/whatsapp/estado', cookies: admin })).json()).toMatchObject({ configurado: true, estado: 'CONECTADO' });
+    // El detalle técnico del conector no se muestra a los clientes.
+    expect((await app.inject({ method: 'GET', url: '/api/canales/whatsapp/estado', cookies: admin })).json()).toMatchObject({ configurado: true, estado: 'CONECTADO', detalle: null });
     expect((await app.inject({ method: 'GET', url: '/api/canales/whatsapp/estado', cookies: await ingresar(e.usuarios.contadorA1) })).statusCode).toBe(403);
     await e.owner.query(`UPDATE estado_canal_whatsapp SET ultimo_latido = now() - interval '5 minutes'`);
     expect((await app.inject({ method: 'GET', url: '/api/canales/whatsapp/estado', cookies: admin })).json()).toMatchObject({ estado: 'DESCONECTADO' });
+    await e.owner.query(`INSERT INTO mensajes_whatsapp (id_externo, telefono, tipo, recibido_en) VALUES ('viejo-1', '+56977777777', 'TEXTO', now() - interval '40 days')`);
     await latido('CONECTADO');
+    // Retención: los metadatos de números desconocidos se borran a los 30 días.
+    expect((await e.owner.query(`SELECT count(*)::int AS n FROM mensajes_whatsapp WHERE id_externo = 'viejo-1'`)).rows[0]).toEqual({ n: 0 });
     const { rows } = await e.owner.query(`SELECT accion FROM bitacora WHERE accion IN ('WHATSAPP_CONECTADO', 'WHATSAPP_DESCONECTADO') ORDER BY id`);
     // Primera conexión y reconexión tras la caída.
     expect(rows.map((r: { accion: string }) => r.accion)).toEqual(['WHATSAPP_CONECTADO', 'WHATSAPP_CONECTADO']);

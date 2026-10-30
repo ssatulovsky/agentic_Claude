@@ -1,7 +1,7 @@
 import type { FastifyInstance, FastifyRequest } from 'fastify';
 import { sql } from 'kysely';
 import { z } from 'zod';
-import { CABECERA_FIRMA, CABECERA_MARCA, firmaValida } from '../../canales/whatsapp/firma.js';
+import { CABECERA_FIRMA, CABECERA_MARCA, firmaValida, marcaVigente } from '../../canales/whatsapp/firma.js';
 import { generarCodigo, hashCodigo, type ServicioWhatsapp } from '../../canales/whatsapp/servicio.js';
 import { contextoDeUsuario, enContexto } from '../../db/conexion.js';
 import { ErrorNegocio } from '../../errores.js';
@@ -19,12 +19,6 @@ const mensaje = z.discriminatedUnion('tipo', [
   }),
 ]);
 
-declare module 'fastify' {
-  interface FastifyRequest {
-    cuerpoCrudo?: string;
-  }
-}
-
 const noConfigurado = () => new ErrorNegocio('CANAL_NO_CONFIGURADO', 'El canal WhatsApp no está configurado en este servidor.', 404);
 
 /**
@@ -34,24 +28,35 @@ const noConfigurado = () => new ErrorNegocio('CANAL_NO_CONFIGURADO', 'El canal W
  *  - Administración: estado de la conexión.
  */
 export async function rutasWhatsapp(app: FastifyInstance, deps: Dependencias, servicio: ServicioWhatsapp | null): Promise<void> {
-  // Rutas del puente: sin sesión; cuerpo crudo para verificar la firma.
+  // Rutas del puente: sin sesión. Antes de leer el cuerpo se revisan la IP (si se configuró)
+  // y las cabeceras de firma; la firma se verifica sobre el cuerpo crudo antes de interpretarlo.
+  const ipsPuente = new Set((deps.config.WHATSAPP_PUENTE_IPS ?? '').split(',').map((x) => x.trim()).filter(Boolean));
+  const cabecera = (req: FastifyRequest, nombre: string) => {
+    const v = req.headers[nombre];
+    return typeof v === 'string' ? v : undefined;
+  };
   await app.register(async (puente) => {
-    puente.addContentTypeParser('application/json', { parseAs: 'string', bodyLimit: 16 * 1024 * 1024 }, (req, cuerpo, listo) => {
-      (req as FastifyRequest).cuerpoCrudo = cuerpo as string;
+    puente.addHook('onRequest', async (req) => {
+      if (!servicio || !deps.config.WHATSAPP_PUENTE_SECRETO) throw noConfigurado();
+      if (ipsPuente.size > 0 && !ipsPuente.has(req.ip)) throw new ErrorNegocio('FIRMA_INVALIDA', 'Firma inválida.', 401);
+      if (!marcaVigente(cabecera(req, CABECERA_MARCA), cabecera(req, CABECERA_FIRMA))) throw new ErrorNegocio('FIRMA_INVALIDA', 'Firma inválida.', 401);
+    });
+    puente.addContentTypeParser('application/json', { parseAs: 'string' }, (req, cuerpo, listo) => {
+      const r = req as FastifyRequest;
+      const destino = `${r.method} ${r.url.split('?')[0]}`;
+      if (!firmaValida(deps.config.WHATSAPP_PUENTE_SECRETO!, cabecera(r, CABECERA_MARCA), cabecera(r, CABECERA_FIRMA), destino, cuerpo as string)) {
+        listo(new ErrorNegocio('FIRMA_INVALIDA', 'Firma inválida.', 401), undefined);
+        return;
+      }
       try {
         listo(null, JSON.parse(cuerpo as string) as unknown);
       } catch {
         listo(new ErrorNegocio('DATOS_INVALIDOS', 'JSON inválido.', 400), undefined);
       }
     });
-    puente.addHook('preHandler', async (req) => {
-      const secreto = deps.config.WHATSAPP_PUENTE_SECRETO;
-      if (!servicio || !secreto) throw noConfigurado();
-      const marca = req.headers[CABECERA_MARCA];
-      const firma = req.headers[CABECERA_FIRMA];
-      if (!firmaValida(secreto, typeof marca === 'string' ? marca : undefined, typeof firma === 'string' ? firma : undefined, req.cuerpoCrudo ?? '')) {
-        throw new ErrorNegocio('FIRMA_INVALIDA', 'Firma inválida.', 401);
-      }
+    // Sin cuerpo no hay nada que firmar: se rechaza.
+    puente.addHook('preValidation', async (req) => {
+      if (req.body === undefined) throw new ErrorNegocio('FIRMA_INVALIDA', 'Firma inválida.', 401);
     });
 
     puente.post('/canales/whatsapp/mensajes', { bodyLimit: 16 * 1024 * 1024, config: { rateLimit: { max: 600, timeWindow: '1 minute' } } }, async (req, reply) => {
@@ -62,7 +67,7 @@ export async function rutasWhatsapp(app: FastifyInstance, deps: Dependencias, se
       return reply.status(202).send({ aceptado: nuevo, ...(nuevo ? {} : { motivo: 'DUPLICADO' }) });
     });
 
-    puente.post('/canales/whatsapp/latido', async (req) => {
+    puente.post('/canales/whatsapp/latido', { bodyLimit: 4096 }, async (req) => {
       const d = validar(z.object({ estado: z.enum(['CONECTADO', 'DESCONECTADO']), detalle: z.string().max(300).optional() }), req.body);
       await servicio!.latido(d.estado, d.detalle ?? null);
       return { registrado: true };
@@ -89,10 +94,10 @@ export async function rutasWhatsapp(app: FastifyInstance, deps: Dependencias, se
     );
 
     web.post('/yo/whatsapp/vincular', { config: { rateLimit: { max: 5, timeWindow: '10 minutes' } } }, async (req) => {
-      if (!servicio || !deps.config.WHATSAPP_PUENTE_SECRETO) throw noConfigurado();
+      if (!servicio) throw noConfigurado();
       const codigo = generarCodigo();
       const tel = await enContexto(deps.db, contextoDeUsuario(req.sesion!.usuarioId), async (trx) => {
-        const { rows } = await sql<{ t: string }>`SELECT whatsapp_iniciar_vinculo(${hashCodigo(deps.config.WHATSAPP_PUENTE_SECRETO!, codigo)}) AS t`.execute(trx);
+        const { rows } = await sql<{ t: string }>`SELECT whatsapp_iniciar_vinculo(${hashCodigo(deps.config.CLAVE_MAESTRA_CIFRADO, codigo)}) AS t`.execute(trx);
         return rows[0]!.t;
       });
       return {

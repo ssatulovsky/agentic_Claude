@@ -218,14 +218,15 @@ export async function crearServidor(depsEntrada: Dependencias): Promise<FastifyI
               : c.TRANSCRIPCION_URL
                 ? new TranscriptorCompatible({ url: c.TRANSCRIPCION_URL, modelo: c.TRANSCRIPCION_MODELO, ...(c.TRANSCRIPCION_API_KEY ? { apiKey: c.TRANSCRIPCION_API_KEY } : {}) })
                 : null,
-          secreto: c.WHATSAPP_PUENTE_SECRETO,
+          claveMaestra: c.CLAVE_MAESTRA_CIFRADO,
           plazoConversacionMs: c.IA_PLAZO_CONVERSACION_MS,
           registrar: { warn: (d, m) => app.log.warn(d, m), error: (d, m) => app.log.error(d, m) },
         })
       : null;
   app.decorate('canalWhatsapp', whatsapp);
   app.addHook('onClose', async () => {
-    await whatsapp?.esperarPendientes();
+    // Plazo acotado: lo que quede a medias, el conector lo reenvía y se reprocesa.
+    await whatsapp?.esperarPendientes(20_000);
   });
   await app.register(async (r) => rutasWhatsapp(r, deps, whatsapp), { prefix: '/api' });
 

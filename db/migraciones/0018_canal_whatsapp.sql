@@ -29,7 +29,9 @@ CREATE TABLE vinculos_whatsapp (
   CHECK (estado <> 'PENDIENTE' OR (codigo_hash IS NOT NULL AND codigo_vence_en IS NOT NULL)),
   CHECK (estado <> 'VERIFICADO' OR (verificado_en IS NOT NULL AND vence_en IS NOT NULL AND codigo_hash IS NULL))
 );
-CREATE UNIQUE INDEX vinculos_whatsapp_telefono_uq ON vinculos_whatsapp (telefono) WHERE estado <> 'REVOCADO';
+-- Un teléfono, un vínculo verificado. (Las vinculaciones pendientes no bloquean: al confirmar
+-- solo cuenta la de la cuenta que hoy tiene ese teléfono.)
+CREATE UNIQUE INDEX vinculos_whatsapp_telefono_uq ON vinculos_whatsapp (telefono) WHERE estado = 'VERIFICADO';
 
 -- Mensajes recibidos por el canal: solo metadatos. El texto queda en las trazas
 -- del agente (con las mismas reglas de acceso); los audios no se guardan.
@@ -40,6 +42,7 @@ CREATE TABLE mensajes_whatsapp (
   usuario_id    uuid REFERENCES usuarios(id) ON DELETE SET NULL,
   tipo          text NOT NULL CHECK (tipo IN ('TEXTO', 'AUDIO')),
   estado        text NOT NULL DEFAULT 'RECIBIDO' CHECK (estado IN ('RECIBIDO', 'RESPONDIDO', 'IGNORADO', 'ERROR')),
+  reintentos    int NOT NULL DEFAULT 0,
   detalle       text,
   recibido_en   timestamptz NOT NULL DEFAULT now(),
   procesado_en  timestamptz
@@ -56,11 +59,15 @@ CREATE TABLE estado_canal_whatsapp (
 );
 INSERT INTO estado_canal_whatsapp (estado) VALUES ('SIN_DATOS');
 
--- Si cambia el teléfono de una persona o se desactiva su cuenta, el vínculo se revoca.
+-- Si cambia el teléfono, la contraseña o el doble factor de una persona, o se desactiva su
+-- cuenta, el vínculo se revoca (una cuenta comprometida y recuperada no conserva el WhatsApp).
 CREATE FUNCTION whatsapp_revocar_por_cambio_usuario() RETURNS trigger
 LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 BEGIN
-  IF NEW.telefono_whatsapp IS DISTINCT FROM OLD.telefono_whatsapp OR NEW.estado <> 'ACTIVO' THEN
+  IF NEW.telefono_whatsapp IS DISTINCT FROM OLD.telefono_whatsapp OR NEW.estado <> 'ACTIVO'
+     OR NEW.password_hash IS DISTINCT FROM OLD.password_hash
+     OR NEW.totp_secreto_cifrado IS DISTINCT FROM OLD.totp_secreto_cifrado
+     OR NEW.totp_activo IS DISTINCT FROM OLD.totp_activo THEN
     UPDATE vinculos_whatsapp SET estado = 'REVOCADO', codigo_hash = NULL, codigo_vence_en = NULL,
       conversacion_id = NULL, actualizado_en = now()
     WHERE usuario_id = NEW.id AND estado <> 'REVOCADO';
@@ -68,7 +75,7 @@ BEGIN
   RETURN NEW;
 END;
 $$;
-CREATE TRIGGER usuarios_revocar_whatsapp AFTER UPDATE OF telefono_whatsapp, estado ON usuarios
+CREATE TRIGGER usuarios_revocar_whatsapp AFTER UPDATE OF telefono_whatsapp, estado, password_hash, totp_secreto_cifrado, totp_activo ON usuarios
   FOR EACH ROW EXECUTE FUNCTION whatsapp_revocar_por_cambio_usuario();
 
 -- ---------------------------------------------------------------------------
@@ -87,7 +94,8 @@ BEGIN
   IF p_codigo_hash IS NULL OR length(p_codigo_hash) <> 32 THEN
     RAISE EXCEPTION 'Código inválido' USING ERRCODE = 'check_violation';
   END IF;
-  SELECT telefono_whatsapp INTO v_telefono FROM usuarios WHERE id = app_usuario_id() AND estado = 'ACTIVO';
+  -- FOR SHARE: un cambio simultáneo del teléfono espera a que esta vinculación termine (y la revoca).
+  SELECT telefono_whatsapp INTO v_telefono FROM usuarios WHERE id = app_usuario_id() AND estado = 'ACTIVO' FOR SHARE;
   IF v_telefono IS NULL THEN
     RAISE EXCEPTION 'Su cuenta no tiene un teléfono de WhatsApp registrado; pídalo al administrador'
       USING ERRCODE = 'check_violation';
@@ -155,8 +163,9 @@ LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
   SELECT CASE WHEN c.ultimo_latido IS NULL THEN 'SIN_DATOS'
               WHEN c.ultimo_latido < now() - interval '3 minutes' THEN 'DESCONECTADO'
               ELSE c.estado END,
+         -- El detalle técnico del conector es de la plataforma; los clientes ven solo el estado.
          CASE WHEN c.ultimo_latido < now() - interval '3 minutes' THEN 'El conector no informa su estado hace más de 3 minutos'
-              ELSE c.detalle END,
+              ELSE NULL END,
          c.ultimo_latido, c.cambiado_en
   FROM estado_canal_whatsapp c
   WHERE app_usuario_id() IS NOT NULL AND app_tiene_permiso_cliente('usuarios.administrar')
@@ -172,18 +181,36 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   v_id bigint;
 BEGIN
+  -- Un mensaje que quedó sin procesar (el servidor se reinició a mitad) se puede reprocesar
+  -- cuando el conector lo reenvía, pasado el plazo máximo de una consulta, hasta 3 veces.
   INSERT INTO mensajes_whatsapp (id_externo, telefono, tipo) VALUES (p_id_externo, p_telefono, p_tipo)
-  ON CONFLICT (id_externo) DO NOTHING
+  ON CONFLICT (id_externo) DO UPDATE SET reintentos = mensajes_whatsapp.reintentos + 1, recibido_en = now()
+    WHERE mensajes_whatsapp.estado = 'RECIBIDO' AND mensajes_whatsapp.recibido_en < now() - interval '15 minutes'
+      AND mensajes_whatsapp.reintentos < 3 AND mensajes_whatsapp.telefono = EXCLUDED.telefono
   RETURNING id INTO v_id;
   RETURN v_id;
 END;
 $$;
 
+-- El usuario solo se anota si es quien tiene vinculado ese teléfono.
 CREATE FUNCTION whatsapp_marcar_mensaje(p_id bigint, p_estado text, p_usuario uuid, p_detalle text) RETURNS void
 LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
-  UPDATE mensajes_whatsapp SET estado = p_estado, usuario_id = coalesce(p_usuario, usuario_id),
+  UPDATE mensajes_whatsapp m SET estado = p_estado,
+    usuario_id = CASE WHEN EXISTS (SELECT 1 FROM vinculos_whatsapp v WHERE v.usuario_id = p_usuario AND v.telefono = m.telefono)
+                      THEN p_usuario ELSE m.usuario_id END,
     detalle = left(p_detalle, 300), procesado_en = now()
-  WHERE id = p_id AND estado = 'RECIBIDO'
+  WHERE m.id = p_id AND m.estado = 'RECIBIDO' AND p_estado IN ('RESPONDIDO', 'IGNORADO', 'ERROR')
+$$;
+
+-- Retención: los metadatos de números desconocidos se borran a los 30 días; el resto, al año.
+CREATE FUNCTION whatsapp_purgar_mensajes() RETURNS int
+LANGUAGE sql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  WITH b AS (
+    DELETE FROM mensajes_whatsapp
+    WHERE (usuario_id IS NULL AND recibido_en < now() - interval '30 days')
+       OR recibido_en < now() - interval '365 days'
+    RETURNING 1)
+  SELECT count(*)::int FROM b
 $$;
 
 -- Quién escribe: la persona con vínculo verificado y vigente para ese teléfono,
@@ -204,9 +231,10 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   v vinculos_whatsapp;
 BEGIN
-  SELECT * INTO v FROM vinculos_whatsapp
-  WHERE telefono = p_telefono AND estado = 'PENDIENTE'
-  FOR UPDATE;
+  -- Solo cuenta la vinculación de la cuenta que hoy tiene ese teléfono (único en usuarios).
+  SELECT vw.* INTO v FROM vinculos_whatsapp vw JOIN usuarios u ON u.id = vw.usuario_id
+  WHERE vw.telefono = p_telefono AND vw.estado = 'PENDIENTE' AND u.telefono_whatsapp = p_telefono AND u.estado = 'ACTIVO'
+  FOR UPDATE OF vw;
   IF v.usuario_id IS NULL THEN
     RETURN 'SIN_VINCULACION_PENDIENTE';
   END IF;
@@ -274,5 +302,6 @@ GRANT EXECUTE ON FUNCTION
   whatsapp_marcar_mensaje(bigint, text, uuid, text),
   whatsapp_identificar(text),
   whatsapp_confirmar_vinculo(text, bytea),
-  whatsapp_latido(text, text)
+  whatsapp_latido(text, text),
+  whatsapp_purgar_mensajes()
 TO erp_auth;

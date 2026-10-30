@@ -46,12 +46,17 @@ const esquema = z.object({
   // con firma HMAC-SHA256 con este secreto compartido.
   WHATSAPP_PUENTE_URL: z.url().optional(),
   WHATSAPP_PUENTE_SECRETO: z.string().min(32).optional(),
+  // Direcciones IP desde las que puede llamar el puente (separadas por coma). Vacío = cualquiera (solo firma).
+  WHATSAPP_PUENTE_IPS: z.string().optional(),
   // Número de WhatsApp de la plataforma, para mostrarlo en la web al vincular.
   WHATSAPP_NUMERO: z.string().regex(/^\+[1-9]\d{7,14}$/u).optional(),
   // Transcripción de notas de voz: servidor compatible con /v1/audio/transcriptions (p. ej. Whisper local).
   TRANSCRIPCION_URL: z.url().optional(),
   TRANSCRIPCION_MODELO: z.string().min(1).default('whisper-1'),
   TRANSCRIPCION_API_KEY: z.string().min(1).optional(),
+  // Una nota de voz puede contener una clave dictada: la transcripción debe ser local salvo
+  // autorización expresa para usar un servicio externo.
+  TRANSCRIPCION_EXTERNA_AUTORIZADA: z.enum(['true', 'false']).default('false'),
 });
 
 export type Configuracion = z.infer<typeof esquema>;
@@ -66,5 +71,23 @@ export function cargarConfiguracion(entorno: NodeJS.ProcessEnv = process.env): C
   if (config.NODE_ENV === 'production' && /^0+$/.test(config.CLAVE_MAESTRA_CIFRADO)) {
     throw new Error('CLAVE_MAESTRA_CIFRADO no puede ser una clave trivial en producción');
   }
+  if (config.TRANSCRIPCION_URL && !esHostLocal(new URL(config.TRANSCRIPCION_URL).hostname) && config.TRANSCRIPCION_EXTERNA_AUTORIZADA !== 'true') {
+    throw new Error(
+      'TRANSCRIPCION_URL apunta a un servicio externo: las notas de voz podrían llevar claves dictadas. Use un servicio local o autorícelo con TRANSCRIPCION_EXTERNA_AUTORIZADA=true.',
+    );
+  }
   return config;
+}
+
+/** true si el host es la propia máquina, una red privada o un nombre interno (sin punto o .local/.internal). */
+export function esHostLocal(host: string): boolean {
+  const h = host.replace(/^\[|\]$/gu, '').toLowerCase();
+  if (h === 'localhost' || h === '::1') return true;
+  if (h.includes(':')) return /^f[cd]/u.test(h); // IPv6 local única (fc00::/7)
+  const ip = /^(\d+)\.(\d+)\.(\d+)\.(\d+)$/u.exec(h);
+  if (ip) {
+    const [a, b] = [Number(ip[1]), Number(ip[2])];
+    return a === 10 || a === 127 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168);
+  }
+  return !h.includes('.') || /\.(local|internal|lan)$/u.test(h);
 }

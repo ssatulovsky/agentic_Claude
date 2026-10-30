@@ -37,7 +37,7 @@ export class PuenteHttp implements CanalMensajeria {
       const cuerpo = JSON.stringify({ para: telefono, texto: parte });
       const r = await (this.opciones.fetch ?? fetch)(`${this.opciones.url.replace(/\/$/u, '')}/enviar`, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', ...cabecerasFirmadas(this.opciones.secreto, cuerpo) },
+        headers: { 'content-type': 'application/json', ...cabecerasFirmadas(this.opciones.secreto, 'POST /enviar', cuerpo) },
         body: cuerpo,
         signal: AbortSignal.timeout(this.opciones.timeoutMs ?? 15_000),
       });

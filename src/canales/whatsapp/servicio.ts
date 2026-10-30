@@ -56,8 +56,38 @@ function normalizar(texto: string): string {
   return texto.normalize('NFD').replace(/\p{M}/gu, '').toLowerCase().replace(/\s+/gu, ' ').trim();
 }
 
-export function hashCodigo(secreto: string, codigo: string): Buffer {
-  return createHmac('sha256', secreto).update(`vinculo-whatsapp:${codigo}`).digest();
+/**
+ * Hash del código de vinculación, con una clave derivada de la clave maestra (no del secreto
+ * del puente: cambiar ese secreto no debe afectar otras cosas).
+ */
+export function hashCodigo(claveMaestraHex: string, codigo: string): Buffer {
+  const clave = createHmac('sha256', Buffer.from(claveMaestraHex, 'hex')).update('whatsapp:codigos-de-vinculacion').digest();
+  return createHmac('sha256', clave).update(codigo).digest();
+}
+
+/**
+ * Límite de mensajes no solicitados (a números sin vínculo o a intentos de vinculación
+ * fallidos): responder en masa es lo que hace que WhatsApp bloquee un número.
+ */
+class LimiteAvisos {
+  private readonly porNumero = new Map<string, number[]>();
+  private global: number[] = [];
+
+  constructor(
+    private readonly maxPorNumeroHora: number,
+    private readonly maxGlobalMinuto: number,
+  ) {}
+
+  permitir(telefono: string, ahora = Date.now()): boolean {
+    this.global = this.global.filter((t) => ahora - t < 60_000);
+    const propios = (this.porNumero.get(telefono) ?? []).filter((t) => ahora - t < 3_600_000);
+    if (propios.length >= this.maxPorNumeroHora || this.global.length >= this.maxGlobalMinuto) return false;
+    if (this.porNumero.size > 10_000) this.porNumero.clear();
+    propios.push(ahora);
+    this.porNumero.set(telefono, propios);
+    this.global.push(ahora);
+    return true;
+  }
 }
 
 export function generarCodigo(): string {
@@ -71,7 +101,8 @@ export function generarCodigo(): string {
  */
 export class ServicioWhatsapp {
   private readonly pendientes = new Set<Promise<void>>();
-  private readonly avisosSinVinculo = new Map<string, number>();
+  private readonly avisosSinVinculo = new LimiteAvisos(1, 30);
+  private readonly avisosVinculacion = new LimiteAvisos(3, 30);
 
   constructor(
     private readonly deps: {
@@ -81,7 +112,8 @@ export class ServicioWhatsapp {
       fabricaModelos: FabricaModelos;
       canal: CanalMensajeria;
       transcriptor: Transcriptor | null;
-      secreto: string;
+      /** Clave maestra (hex): de ella se deriva la clave de los códigos de vinculación. */
+      claveMaestra: string;
       plazoConversacionMs: number;
       registrar: Registro;
     },
@@ -98,21 +130,35 @@ export class ServicioWhatsapp {
       return rows[0]?.id ?? null;
     });
     if (id === null) return false;
-    const tarea = this.procesar(Number(id), m).catch((e: unknown) => {
+    const tarea = this.procesar(Number(id), m).catch(async (e: unknown) => {
       this.deps.registrar.error({ err: e, mensaje: id }, 'Error al procesar un mensaje de WhatsApp');
+      await this.marcar(Number(id), 'ERROR', null, 'ERROR_INTERNO').catch(() => undefined);
     });
     this.pendientes.add(tarea);
     void tarea.finally(() => this.pendientes.delete(tarea));
     return true;
   }
 
-  /** Espera a que terminen los mensajes en proceso (pruebas y cierre ordenado). */
-  async esperarPendientes(): Promise<void> {
-    while (this.pendientes.size > 0) await Promise.allSettled([...this.pendientes]);
+  /**
+   * Espera a que terminen los mensajes en proceso (pruebas y cierre ordenado), con un plazo
+   * máximo. Lo que quede a medias, el conector lo puede reenviar y se reprocesa.
+   */
+  async esperarPendientes(plazoMs = Infinity): Promise<void> {
+    const vence = Date.now() + plazoMs;
+    while (this.pendientes.size > 0 && Date.now() < vence) {
+      const restante = vence - Date.now();
+      await Promise.race([
+        Promise.allSettled([...this.pendientes]),
+        ...(Number.isFinite(restante) ? [new Promise((r) => setTimeout(r, restante))] : []),
+      ]);
+    }
   }
 
   async latido(estado: 'CONECTADO' | 'DESCONECTADO', detalle: string | null): Promise<void> {
-    await sinContexto(this.deps.dbAuth, (trx) => sql`SELECT whatsapp_latido(${estado}, ${detalle})`.execute(trx));
+    await sinContexto(this.deps.dbAuth, async (trx) => {
+      await sql`SELECT whatsapp_latido(${estado}, ${detalle})`.execute(trx);
+      await sql`SELECT whatsapp_purgar_mensajes()`.execute(trx);
+    });
   }
 
   private async marcar(id: number, estado: 'RESPONDIDO' | 'IGNORADO' | 'ERROR', usuarioId: string | null, detalle: string | null) {
@@ -134,7 +180,7 @@ export class ServicioWhatsapp {
     if (vincular) {
       const resultado = await sinContexto(this.deps.dbAuth, async (trx) => {
         const { rows } = await sql<{ r: string }>`
-          SELECT whatsapp_confirmar_vinculo(${m.de}, ${hashCodigo(this.deps.secreto, vincular[1]!)}) AS r`.execute(trx);
+          SELECT whatsapp_confirmar_vinculo(${m.de}, ${hashCodigo(this.deps.claveMaestra, vincular[1]!)}) AS r`.execute(trx);
         return rows[0]!.r;
       });
       const textos: Record<string, string> = {
@@ -143,7 +189,12 @@ export class ServicioWhatsapp {
         CODIGO_VENCIDO: 'El código venció o tuvo demasiados intentos. Genere uno nuevo en la web.',
         SIN_VINCULACION_PENDIENTE: 'No hay una vinculación pendiente para este número. Iníciela en la web, en "WhatsApp".',
       };
-      await this.responder(id, m.de, textos[resultado] ?? 'No se pudo vincular.', null, `VINCULAR:${resultado}`);
+      // Los intentos fallidos reciben respuesta a lo más 3 veces por hora y número.
+      if (resultado === 'VINCULADO' || this.avisosVinculacion.permitir(m.de)) {
+        await this.responder(id, m.de, textos[resultado] ?? 'No se pudo vincular.', null, `VINCULAR:${resultado}`);
+      } else {
+        await this.marcar(id, 'IGNORADO', null, `VINCULAR:${resultado}`);
+      }
       return;
     }
 
@@ -153,10 +204,7 @@ export class ServicioWhatsapp {
     });
     if (!identidad) {
       // A un número desconocido se le avisa a lo más una vez por hora (sin revelar cuentas).
-      const ultimo = this.avisosSinVinculo.get(m.de) ?? 0;
-      if (Date.now() - ultimo > 60 * 60 * 1000) {
-        if (this.avisosSinVinculo.size > 10_000) this.avisosSinVinculo.clear();
-        this.avisosSinVinculo.set(m.de, Date.now());
+      if (this.avisosSinVinculo.permitir(m.de)) {
         await this.responder(id, m.de, 'Este número no está vinculado. Ingrese a la web del ERP, opción "WhatsApp", para vincularlo.', null, 'SIN_VINCULO');
       } else {
         await this.marcar(id, 'IGNORADO', null, 'SIN_VINCULO');
