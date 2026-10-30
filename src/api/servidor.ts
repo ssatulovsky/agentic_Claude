@@ -14,6 +14,8 @@ import { rutasAdministracion } from './rutas/administracion.js';
 import { rutasAgentes } from './rutas/agentes.js';
 import { rutasAutenticacion } from './rutas/autenticacion.js';
 import { rutasContabilidad } from './rutas/contabilidad.js';
+import { fabricaDesdeConfiguracion, type FabricaModelos } from '../ia/enrutador.js';
+import { rutasIa } from './rutas/ia.js';
 import { rutasParametrizacion } from './rutas/parametrizacion.js';
 import { rutasTesoreria } from './rutas/tesoreria.js';
 import { rutasTributario } from './rutas/tributario.js';
@@ -33,6 +35,8 @@ export interface Dependencias {
   config: Configuracion;
   autenticacion: ServicioAutenticacion;
   registro: RegistroAgentes;
+  /** Clientes de los modelos de IA; por defecto, según las claves y URL de la configuración. */
+  fabricaModelos?: FabricaModelos;
 }
 
 /** Valida un cuerpo, parámetros o consulta con zod y devuelve un error 422 legible si no cumple. */
@@ -72,7 +76,8 @@ export function exigirSesion(deps: Dependencias, opciones: { permitirSinMfa?: bo
   };
 }
 
-export async function crearServidor(deps: Dependencias): Promise<FastifyInstance> {
+export async function crearServidor(depsEntrada: Dependencias): Promise<FastifyInstance> {
+  const deps: Dependencias = { ...depsEntrada, fabricaModelos: depsEntrada.fabricaModelos ?? fabricaDesdeConfiguracion(depsEntrada.config) };
   const app = Fastify({
     logger: deps.config.NODE_ENV === 'test' ? false : { level: 'info', redact: ['req.headers.cookie', 'req.body'] },
     bodyLimit: 1_048_576,
@@ -181,6 +186,7 @@ export async function crearServidor(deps: Dependencias): Promise<FastifyInstance
   await app.register(async (r) => rutasTributario(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasTesoreria(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasParametrizacion(r, deps), { prefix: '/api' });
+  await app.register(async (r) => rutasIa(r, deps), { prefix: '/api' });
 
   return app;
 }
