@@ -15,7 +15,8 @@
     "test:watch": "vitest",
     "cli:verificar-bitacora": "tsx src/cli/verificarBitacora.ts",
     "cli:sincronizar-indicadores": "tsx src/cli/sincronizarIndicadores.ts",
-    "cli:ia": "tsx src/cli/iaPlataforma.ts"
+    "cli:ia": "tsx src/cli/iaPlataforma.ts",
+    "puente:whatsapp": "npm --prefix puente-whatsapp start"
   },
   "license": "UNLICENSED",
   "dependencies": {

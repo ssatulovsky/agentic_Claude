@@ -115,6 +115,8 @@ export class ServicioWhatsapp {
       /** Clave maestra (hex): de ella se deriva la clave de los códigos de vinculación. */
       claveMaestra: string;
       plazoConversacionMs: number;
+      /** false: a un número no vinculado no se le responde nada (número personal de pruebas). */
+      avisarNoVinculados?: boolean;
       registrar: Registro;
     },
   ) {}
@@ -204,7 +206,7 @@ export class ServicioWhatsapp {
     });
     if (!identidad) {
       // A un número desconocido se le avisa a lo más una vez por hora (sin revelar cuentas).
-      if (this.avisosSinVinculo.permitir(m.de)) {
+      if (this.deps.avisarNoVinculados !== false && this.avisosSinVinculo.permitir(m.de)) {
         await this.responder(id, m.de, 'Este número no está vinculado. Ingrese a la web del ERP, opción "WhatsApp", para vincularlo.', null, 'SIN_VINCULO');
       } else {
         await this.marcar(id, 'IGNORADO', null, 'SIN_VINCULO');

@@ -101,7 +101,9 @@ export function WhatsApp() {
           {codigo && (
             <div className="codigo-vinculo" role="status">
               <p>
-                {codigo.numeroErp ? (
+                {codigo.numeroErp && codigo.numeroErp === estado.telefonoRegistrado ? (
+                  'Su teléfono es también el número del ERP: envíese el mensaje a sí mismo, en el chat «Tú» (Mensajes a ti mismo):'
+                ) : codigo.numeroErp ? (
                   <>
                     Desde su teléfono, escriba al <strong>{codigo.numeroErp}</strong>:
                   </>
