@@ -83,8 +83,13 @@ BEGIN
                 WHERE m IS NOT NULL AND (m = 'NaN' OR m <> trunc(m) OR m > 999999999999))
      OR d.tipo_operacion IS NULL
      OR (d.montos_especiales_detalle IS NOT NULL AND (jsonb_typeof(d.montos_especiales_detalle) <> 'object'
+         OR (SELECT count(*) FROM jsonb_object_keys(d.montos_especiales_detalle)) > 30
          OR EXISTS (SELECT 1 FROM jsonb_each(d.montos_especiales_detalle) x
-                    WHERE jsonb_typeof(x.value) <> 'number' OR (x.value)::numeric <= 0 OR length(x.key) > 100)))
+                    WHERE length(x.key) > 100
+                       OR CASE WHEN jsonb_typeof(x.value) = 'number'
+                               THEN (x.value)::numeric <= 0 OR (x.value)::numeric <> trunc((x.value)::numeric)
+                                    OR (x.value)::numeric > 999999999999
+                               ELSE true END)))
      OR (p_libro = 'VENTA' AND d.tipo_operacion IS DISTINCT FROM 'DEL_GIRO'
          AND d.tipo_operacion IS DISTINCT FROM 'BIENES_RAICES' AND d.tipo_operacion IS DISTINCT FROM 'ACTIVO_FIJO')
      OR d.fecha_documento IS NULL
