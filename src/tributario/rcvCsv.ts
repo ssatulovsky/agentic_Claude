@@ -50,6 +50,12 @@ export interface DocumentoRcv {
   iva_fuera_plazo: number;
   /** Crédito de empresa constructora e IVA de terceros. */
   montos_especiales: number;
+  /** IVA no retenido en facturas de compra con retención parcial. */
+  iva_no_retenido: number;
+  /** Tabacos e "Impto. Sin Derecho a Crédito": sin efecto en el F29. */
+  impuestos_sin_credito: number;
+  /** Código del SII de "Valor Otro Impuesto" (ILA, IVA anticipado, diésel, etc.). */
+  codigo_otro_impuesto: number | null;
   monto_total: number;
 }
 
@@ -83,7 +89,11 @@ type Campo =
   | 'iva_retenido'
   | 'iva_fuera_plazo'
   | 'montos_especiales'
+  | 'iva_no_retenido'
+  | 'impuestos_sin_credito'
+  | 'codigo_otro_impuesto'
   | 'monto_total'
+  | 'indicador_nota_factura_compra'
   | 'ignorar';
 
 /** Encabezados conocidos, ya normalizados (minúsculas, sin tildes ni puntuación). */
@@ -117,14 +127,30 @@ const ALIAS: Record<string, Campo> = {
   'iva activo fijo': 'iva_activo_fijo',
   'valor otro impuesto': 'otros_impuestos',
   'valor otro imp': 'otros_impuestos',
-  'impto sin derecho a credito': 'otros_impuestos',
+  'impto sin derecho a credito': 'impuestos_sin_credito',
   'monto total': 'monto_total',
   'iva retenido total': 'iva_retenido',
   'iva retenido parcial': 'iva_retenido',
   'iva fuera de plazo': 'iva_fuera_plazo',
   'credito empresa constructora': 'montos_especiales',
   'iva terceros': 'montos_especiales',
+  // Impuestos sin derecho a crédito para el comprador (se suman; el total los incluye).
+  'tabacos puros': 'impuestos_sin_credito',
+  'tabacos cigarrillos': 'impuestos_sin_credito',
+  'tabacos elaborados': 'impuestos_sin_credito',
+  // IVA no retenido en facturas de compra con retención parcial: requiere revisión.
+  'iva no retenido': 'iva_no_retenido',
+  // Indicador (0/1) de nota de crédito o débito sobre una factura de compra.
+  'nce o nde sobre fact de compra': 'indicador_nota_factura_compra',
+  // Columnas descriptivas: no tienen montos.
   nro: 'ignorar',
+  'fecha acuse': 'ignorar',
+  'fecha acuse recibo': 'ignorar',
+  'fecha reclamo': 'ignorar',
+  'codigo otro impuesto': 'codigo_otro_impuesto',
+  'codigo otro imp': 'codigo_otro_impuesto',
+  'tasa otro impuesto': 'ignorar',
+  'tasa otro imp': 'ignorar',
 };
 
 const OPERACIONES: Record<string, TipoOperacion> = {
@@ -143,7 +169,7 @@ const OBLIGATORIOS: Campo[] = ['tipo_documento', 'tipo_operacion', 'rut_contrapa
 const TIPOS_NOTA_CREDITO = new Set([60, 61, 112]);
 const MAX_ERRORES = 20;
 /** Columnas que pueden repetirse y se suman. */
-const SUMABLES = new Set<Campo>(['otros_impuestos', 'iva_retenido', 'montos_especiales']);
+const SUMABLES = new Set<Campo>(['otros_impuestos', 'iva_retenido', 'montos_especiales', 'iva_no_retenido', 'impuestos_sin_credito']);
 const corto = (v: string) => (v.length > 40 ? `${v.slice(0, 40)}…` : v);
 
 export function normalizarTexto(texto: string): string {
@@ -248,6 +274,15 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
     if (campo === 'ignorar') return;
     columnas.set(campo, [...(columnas.get(campo) ?? []), i]);
   });
+  // El SII ofrece dos descargas: "Resumen" (totales por tipo de documento) y "Detalle".
+  // El F29 necesita el detalle (tipo de compra o venta de cada documento).
+  if (!columnas.has('folio') && encabezado.some((n) => normalizarTexto(n) === 'total documentos')) {
+    throw new ErrorNegocio(
+      'RCV_ES_RESUMEN',
+      'Este archivo es el resumen del RCV. Descargue el detalle: en el Registro de Compras y Ventas, opción "Descargar Detalles".',
+      422,
+    );
+  }
   const faltantes = OBLIGATORIOS.filter((c) => !columnas.has(c));
   if (faltantes.length > 0) {
     throw new ErrorNegocio('RCV_FORMATO', `Faltan columnas obligatorias en el archivo: ${faltantes.join(', ')}.`, 422, {
@@ -338,9 +373,21 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
     }
     const otros = sumas.otros_impuestos ?? 0;
 
+    const indicador = normalizarTexto(valor('indicador_nota_factura_compra'));
+    if (!['', '0', 'n', 'no', '1', 's', 'si'].includes(indicador)) {
+      return error(`indicador de nota sobre factura de compra inválido ("${corto(valor('indicador_nota_factura_compra'))}")`);
+    }
+    if (['1', 's', 'si'].includes(indicador)) {
+      advertencias.push(`Fila ${nFila} (folio ${folio}): nota de crédito o débito sobre una factura de compra; revise su tratamiento en el F29.`);
+    }
+
     const codigoTexto = valor('codigo_iva_no_recuperable');
     const codigoNoRec = codigoTexto === '' ? null : /^\d{1,3}$/u.test(codigoTexto) ? Number(codigoTexto) : NaN;
     if (Number.isNaN(codigoNoRec)) return error(`código de IVA no recuperable inválido ("${corto(codigoTexto)}")`);
+
+    const codigoOtroTexto = valor('codigo_otro_impuesto');
+    const codigoOtro = codigoOtroTexto === '' || codigoOtroTexto === '0' ? null : /^\d{1,4}$/u.test(codigoOtroTexto) ? Number(codigoOtroTexto) : NaN;
+    if (Number.isNaN(codigoOtro)) return error(`código de otro impuesto inválido ("${corto(codigoOtroTexto)}")`);
 
     const clave = `${tipo}|${rut}|${folio}`;
     if (claves.has(clave)) return error(`documento repetido (tipo ${tipo}, RUT ${rut}, folio ${folio})`);
@@ -367,6 +414,9 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
       iva_retenido: sumas.iva_retenido ?? 0,
       iva_fuera_plazo: 0,
       montos_especiales: sumas.montos_especiales ?? 0,
+      iva_no_retenido: sumas.iva_no_retenido ?? 0,
+      impuestos_sin_credito: sumas.impuestos_sin_credito ?? 0,
+      codigo_otro_impuesto: codigoOtro,
       monto_total: montos.monto_total ?? 0,
     });
     const doc = documentos[documentos.length - 1]!;
@@ -383,7 +433,8 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
       doc.iva_uso_comun +
       doc.neto_activo_fijo +
       doc.iva_activo_fijo +
-      doc.otros_impuestos;
+      doc.otros_impuestos +
+      doc.impuestos_sin_credito;
     if (componentes !== doc.monto_total) {
       advertencias.push(`Fila ${nFila} (folio ${folio}): el total ${doc.monto_total} no es la suma de sus montos (${componentes}).`);
     }
