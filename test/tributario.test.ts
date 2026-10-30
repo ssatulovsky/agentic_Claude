@@ -8,6 +8,7 @@ import {
   anularF29,
   aprobarF29,
   configurarTasaPpm,
+  configurarTributario,
   listarF29,
   obtenerF29,
   prepararF29,
@@ -276,6 +277,15 @@ describe('Propuesta de F29', () => {
       /una persona/u,
     );
     await comoContador((trx) => configurarTasaPpm(trx, e.empresaA1, '2025-01-01', 0.25, 'F22 AT2025, tasa informada por el contador'));
+    await comoContador((trx) =>
+      configurarTributario(trx, {
+        empresaId: e.empresaA1,
+        desde: '2025-01-01',
+        regimen: 'PRO_PYME_GENERAL',
+        ivaComprasNoRecuperable: false,
+        motivo: 'Régimen informado por el contador',
+      }),
+    );
   });
 
   it('no se prepara si falta importar uno de los libros', async () => {
