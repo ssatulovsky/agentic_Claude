@@ -16,7 +16,7 @@ CREATE TABLE tributario_configuracion (
   regimen                     text NOT NULL CHECK (regimen IN ('PRO_PYME_TRANSPARENTE', 'PRO_PYME_GENERAL', 'SEMI_INTEGRADO', 'OTRO')),
   iva_compras_no_recuperable  boolean NOT NULL,
   -- Código de IVA no recuperable del SII (1: operaciones exentas o no gravadas).
-  codigo_iva_no_recuperable   int CHECK (codigo_iva_no_recuperable BETWEEN 1 AND 9),
+  codigo_iva_no_recuperable   int CHECK (codigo_iva_no_recuperable IN (1, 2, 3, 4, 9)),
   motivo                      text NOT NULL CHECK (length(trim(motivo)) >= 10),
   estado                      text NOT NULL DEFAULT 'VIGENTE' CHECK (estado IN ('VIGENTE', 'REEMPLAZADA')),
   registrado_por              uuid NOT NULL REFERENCES usuarios(id),
@@ -60,6 +60,11 @@ BEGIN
     RAISE EXCEPTION 'La vigencia parte el primer día de un mes' USING ERRCODE = 'check_violation';
   END IF;
   PERFORM pg_advisory_xact_lock(hashtextextended('config-trib:' || p_empresa::text, 0));
+  IF EXISTS (SELECT 1 FROM f29_declaraciones WHERE empresa_id = p_empresa AND periodo >= p_desde
+             AND estado IN ('APROBADA', 'DECLARADA')) THEN
+    RAISE EXCEPTION 'Hay F29 aprobados o declarados desde %: la nueva configuración debe regir después del último', to_char(p_desde, 'MM-YYYY')
+      USING ERRCODE = 'check_violation';
+  END IF;
   UPDATE tributario_configuracion SET estado = 'REEMPLAZADA'
   WHERE empresa_id = p_empresa AND vigente_desde = p_desde AND estado = 'VIGENTE';
   INSERT INTO tributario_configuracion (empresa_id, vigente_desde, regimen, iva_compras_no_recuperable,
@@ -68,25 +73,73 @@ BEGIN
     CASE WHEN p_iva_compras_no_recuperable THEN coalesce(p_codigo_iva_no_recuperable, 1) END, trim(p_motivo), v_usuario)
   RETURNING id INTO v_id;
   PERFORM contabilidad_auditar('CONFIGURACION_TRIBUTARIA', 'tributario_configuracion', v_id::text,
-    jsonb_build_object('desde', p_desde, 'regimen', p_regimen, 'iva_compras_no_recuperable', p_iva_compras_no_recuperable,
-                       'codigo', p_codigo_iva_no_recuperable, 'motivo', p_motivo), p_empresa);
+    (SELECT jsonb_build_object('desde', c.vigente_desde, 'regimen', c.regimen, 'iva_compras_no_recuperable', c.iva_compras_no_recuperable,
+                               'codigo', c.codigo_iva_no_recuperable, 'motivo', c.motivo)
+     FROM tributario_configuracion c WHERE c.id = v_id), p_empresa);
   RETURN v_id;
 END;
 $$;
 REVOKE EXECUTE ON FUNCTION tributario_configurar(uuid, date, text, boolean, int, text), tributario_configuracion_transicion() FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION tributario_configurar(uuid, date, text, boolean, int, text) TO erp_app;
 
--- Tasas de PPM que la ley fija por régimen (Pro Pyme General: rebaja transitoria 2025–2027).
+-- Tasas de PPM que la ley fija por régimen. Pro Pyme General: 0,25% / 0,5% (art. 14 D N°3
+-- letra k) con rebaja transitoria a 0,125% / 0,25% para los ingresos de agosto 2025 a
+-- diciembre 2027 (Ley 21.755, Circular SII 53/2025). Pro Pyme Transparente: 0,2% / 0,5%,
+-- sin rebaja. La tasa menor rige el año de inicio o con ingresos del año anterior ≤ 50.000 UF.
 INSERT INTO tablas_legales
   (clave, contenido, vigente_desde, vigente_hasta, fuente, url_fuente, nota, estado, cargado_por, aprobado_por)
 VALUES
-  ('PPM.TASAS_POR_REGIMEN',
-   '{"PRO_PYME_TRANSPARENTE": [0.2, 0.5], "PRO_PYME_GENERAL": [0.125, 0.25]}'::jsonb,
-   '2025-01-01', '2028-01-01',
-   'LIR art. 14 letra D N°3 y N°8, art. 84; SII, preguntas frecuentes sobre la tasa de PPM',
-   'https://www.sii.cl/preguntas_frecuentes/declaracion_renta/001_140_0695.htm',
-   'Transparente: 0,2% o 0,5% según ingresos. General: 0,125% o 0,25% (rebaja transitoria 2025-2027). Desde 2028 debe cargarse la tabla vigente.',
+  ('PPM.TASAS_POR_REGIMEN', '{"PRO_PYME_TRANSPARENTE": [0.2, 0.5], "PRO_PYME_GENERAL": [0.25, 0.5]}'::jsonb,
+   '2025-01-01', '2025-08-01', 'LIR art. 14 letra D N°3 letra k) y N°8; Circular SII 53/2025',
+   'https://www.sii.cl/normativa_legislacion/circulares/2025/circu53.pdf', 'Tasas permanentes.',
+   'APROBADO', 'migracion-0014', 'verificacion-documental-2026-10-30'),
+  ('PPM.TASAS_POR_REGIMEN', '{"PRO_PYME_TRANSPARENTE": [0.2, 0.5], "PRO_PYME_GENERAL": [0.125, 0.25]}'::jsonb,
+   '2025-08-01', '2028-01-01', 'Ley 21.755 art. 25; Circular SII 53/2025',
+   'https://www.sii.cl/normativa_legislacion/circulares/2025/circu53.pdf',
+   'Rebaja transitoria del Pro Pyme General para los ingresos de agosto 2025 a diciembre 2027. El Transparente no tiene rebaja.',
+   'APROBADO', 'migracion-0014', 'verificacion-documental-2026-10-30'),
+  ('PPM.TASAS_POR_REGIMEN', '{"PRO_PYME_TRANSPARENTE": [0.2, 0.5], "PRO_PYME_GENERAL": [0.25, 0.5]}'::jsonb,
+   '2028-01-01', NULL, 'LIR art. 14 letra D N°3 letra k) y N°8; Circular SII 53/2025',
+   'https://www.sii.cl/normativa_legislacion/circulares/2025/circu53.pdf',
+   'Vuelven las tasas permanentes; revisar si una ley posterior extiende la rebaja.',
    'APROBADO', 'migracion-0014', 'verificacion-documental-2026-10-30');
+
+-- Nueva versión de las reglas RCV → F29 (revisión independiente): con IVA no recuperable,
+-- las notas de crédito y débito recibidas ajustan el 521 y el 562, la DIN sin derecho a
+-- crédito va a 566/560 y el neto sin crédito toma el de activo fijo si el SII lo trae ahí.
+-- Las versiones anteriores quedan como REEMPLAZADO (las propuestas que las usaron las
+-- siguen referenciando) y la aprobación exige preparar de nuevo con las reglas vigentes.
+ALTER TABLE tablas_legales DROP CONSTRAINT tablas_legales_estado_check;
+ALTER TABLE tablas_legales ADD CONSTRAINT tablas_legales_estado_check
+  CHECK (estado IN ('PROPUESTO', 'APROBADO', 'RECHAZADO', 'REEMPLAZADO'));
+
+CREATE TEMP TABLE reglas_nuevas ON COMMIT DROP AS
+SELECT t.clave,
+       jsonb_set(
+         jsonb_set(t.contenido, '{reglas}',
+           (SELECT jsonb_agg(CASE WHEN r ->> 'nombre' = 'Compras afectas sin derecho a crédito'
+                                  THEN jsonb_set(r, '{montos}', '[{"campo": "neto_sin_credito", "codigo": "521"}]')
+                                  ELSE r END)
+            FROM jsonb_array_elements(t.contenido -> 'reglas') r)
+           || $json$[
+             {"nombre": "Notas de crédito recibidas sin derecho a crédito", "libro": "COMPRA", "tipos": [60, 61], "operaciones": ["IVA_NO_RECUPERABLE"],
+              "montos": [{"campo": "neto_sin_credito", "codigo": "521", "signo": -1}, {"campo": "monto_exento", "codigo": "562", "signo": -1}]},
+             {"nombre": "Notas de débito recibidas sin derecho a crédito", "libro": "COMPRA", "tipos": [55, 56], "operaciones": ["IVA_NO_RECUPERABLE"],
+              "montos": [{"campo": "neto_sin_credito", "codigo": "521"}, {"campo": "monto_exento", "codigo": "562"}]},
+             {"nombre": "Importaciones sin derecho a crédito (DIN)", "libro": "COMPRA", "tipos": [914], "operaciones": ["IVA_NO_RECUPERABLE"],
+              "cantidad": {"codigo": "566"},
+              "montos": [{"campo": "neto_sin_credito", "codigo": "560"}]}
+           ]$json$::jsonb),
+         '{codigos_ajustables}', (t.contenido -> 'codigos_ajustables') || '["566", "560"]'::jsonb) AS contenido,
+       t.vigente_desde, t.vigente_hasta, t.fuente, t.url_fuente,
+       t.nota || ' Versión 2 (migración 0014): notas de crédito y débito y DIN sin derecho a crédito.' AS nota
+FROM tablas_legales t
+WHERE t.clave = 'F29.REGLAS_RCV' AND t.estado = 'APROBADO';
+
+UPDATE tablas_legales SET estado = 'REEMPLAZADO' WHERE clave = 'F29.REGLAS_RCV' AND estado = 'APROBADO';
+INSERT INTO tablas_legales (clave, contenido, vigente_desde, vigente_hasta, fuente, url_fuente, nota, estado, cargado_por, aprobado_por)
+SELECT clave, contenido, vigente_desde, vigente_hasta, fuente, url_fuente, nota, 'APROBADO', 'migracion-0014', 'verificacion-documental-2026-10-30'
+FROM reglas_nuevas;
 
 CREATE OR REPLACE FUNCTION f29_preparar(
   p_empresa uuid, p_anio int, p_mes int,
@@ -206,9 +259,10 @@ BEGIN
   -- Traspaso del RCV según las reglas vigentes. El crédito de uso común se suma sin
   -- redondear y cada código se redondea al final (el factor se aplica sobre el total).
   WITH docs AS (
-    SELECT d.id, i.libro, d.tipo_documento, e.tipo_operacion, d.folio, d.cantidad,
+    SELECT d.id, i.libro, d.tipo_documento, e.tipo_operacion, d.tipo_operacion AS tipo_operacion_rcv, d.folio, d.cantidad,
            jsonb_build_object(
              'monto_exento', d.monto_exento, 'monto_neto', d.monto_neto, 'monto_iva', d.monto_iva,
+             'neto_sin_credito', CASE WHEN d.monto_neto > 0 THEN d.monto_neto ELSE d.neto_activo_fijo END,
              'iva_credito', CASE e.tipo_operacion
                WHEN 'ACTIVO_FIJO' THEN CASE WHEN d.iva_activo_fijo > 0 THEN d.iva_activo_fijo ELSE d.monto_iva END
                WHEN 'IVA_USO_COMUN' THEN CASE WHEN d.iva_uso_comun > 0 THEN d.iva_uso_comun ELSE d.monto_iva END * v_factor
@@ -240,8 +294,8 @@ BEGIN
     (SELECT coalesce(jsonb_agg(jsonb_build_object('regla', nombre, 'documentos', n) ORDER BY nombre), '[]')
        FROM (SELECT c.r ->> 'nombre' AS nombre, sum(c.cantidad) AS n FROM coinc c GROUP BY 1) t),
     (SELECT coalesce(jsonb_agg(jsonb_build_object('libro', libro, 'tipo_documento', tipo_documento,
-                     'tipo_operacion', tipo_operacion, 'documentos', n, 'folios', folios)), '[]')
-       FROM (SELECT d.libro, d.tipo_documento, d.tipo_operacion, count(*) AS n,
+                     'tipo_operacion', tipo_operacion_rcv, 'documentos', n, 'folios', folios)), '[]')
+       FROM (SELECT d.libro, d.tipo_documento, d.tipo_operacion_rcv, count(*) AS n,
                     (array_agg(d.folio ORDER BY d.folio))[1:20] AS folios
              FROM docs d
              WHERE NOT EXISTS (SELECT 1 FROM coinc c WHERE c.id = d.id)
@@ -367,11 +421,15 @@ BEGIN
   IF v_no_rec THEN
     SELECT coalesce(jsonb_agg(jsonb_build_object('tipo_documento', d.tipo_documento, 'folio', d.folio,
              'rut', d.rut_contraparte, 'razon_social', d.razon_social, 'tipo_compra_sii', d.tipo_operacion,
-             'iva', d.monto_iva + d.iva_activo_fijo + d.iva_uso_comun) ORDER BY d.folio), '[]')
+             'iva', CASE d.tipo_operacion
+                      WHEN 'ACTIVO_FIJO' THEN CASE WHEN d.iva_activo_fijo > 0 THEN d.iva_activo_fijo ELSE d.monto_iva END
+                      WHEN 'IVA_USO_COMUN' THEN CASE WHEN d.iva_uso_comun > 0 THEN d.iva_uso_comun ELSE d.monto_iva END
+                      ELSE d.monto_iva END) ORDER BY d.folio), '[]')
     INTO v_reclasificar
     FROM rcv_documentos d
     WHERE d.importacion_id = v_compra
       AND d.tipo_operacion IN ('DEL_GIRO', 'SUPERMERCADOS', 'BIENES_RAICES', 'ACTIVO_FIJO', 'IVA_USO_COMUN')
+      AND d.tipo_documento <> 914
       AND d.monto_iva + d.iva_activo_fijo + d.iva_uso_comun > 0;
     IF jsonb_array_length(v_reclasificar) > 0 THEN
       v_adv := v_adv || jsonb_build_array(jsonb_build_object('tipo', 'RECLASIFICAR_EN_SII',
@@ -392,7 +450,11 @@ BEGIN
   -- La tasa debe ser una de las que la ley fija para el régimen de la empresa.
   IF v_config.regimen IS NOT NULL THEN
     SELECT contenido -> v_config.regimen INTO v_tasas_regimen FROM normativa_tabla('PPM.TASAS_POR_REGIMEN', v_periodo);
-    IF v_tasas_regimen IS NOT NULL AND NOT v_tasas_regimen @> to_jsonb(v_tasa.tasa) THEN
+    IF v_tasas_regimen IS NULL AND v_config.regimen IN ('PRO_PYME_TRANSPARENTE', 'PRO_PYME_GENERAL') THEN
+      v_adv := v_adv || jsonb_build_array(jsonb_build_object('tipo', 'TASAS_PPM_NO_CARGADAS',
+        'mensaje', format('No hay tasas legales de PPM cargadas para el régimen %s en %s: la tasa no se pudo verificar.',
+                          v_config.regimen, to_char(v_periodo, 'MM-YYYY'))));
+    ELSIF v_tasas_regimen IS NOT NULL AND NOT v_tasas_regimen @> to_jsonb(v_tasa.tasa) THEN
       v_adv := v_adv || jsonb_build_array(jsonb_build_object('tipo', 'TASA_PPM_FUERA_DE_REGIMEN',
         'mensaje', format('La tasa de PPM configurada (%s%%) no es una de las que la ley fija para el régimen %s (%s).',
                           v_tasa.tasa, v_config.regimen, v_tasas_regimen)));
@@ -417,6 +479,11 @@ BEGIN
     v_595 := v_595 + v_signo * coalesce((v_cod ->> v_k)::numeric, 0);
   END LOOP;
   v_cod := v_cod || jsonb_build_object('595', v_595, '91', greatest(v_595, 0));
+
+  IF v_no_rec AND v_538 > 0 THEN
+    v_adv := v_adv || jsonb_build_array(jsonb_build_object('tipo', 'CONFIG_NO_RECUPERABLE_CON_VENTAS_AFECTAS',
+      'mensaje', 'La empresa está configurada con solo operaciones exentas, pero este mes tiene ventas afectas: el IVA de las compras destinadas a ellas sí es crédito (total o proporcional). Revise la configuración tributaria.'));
+  END IF;
 
   -- Art. 23 N°1 y N°2 D.L. 825: el IVA de compras solo es crédito si se destina a operaciones gravadas.
   IF v_537 - coalesce((v_cod ->> '504')::numeric, 0) > 0 AND v_538 <= 0
@@ -463,6 +530,60 @@ BEGIN
                        'iva_determinado', v_cod -> '89', 'remanente', v_cod -> '77', 'total_a_pagar', v_cod -> '91',
                        'ajustes', jsonb_array_length(p_ajustes)), p_empresa);
   RETURN v_id;
+END;
+$$;
+
+
+-- La aprobación también exige que la configuración tributaria no haya cambiado.
+CREATE OR REPLACE FUNCTION f29_aprobar(p_id uuid, p_confirmo_advertencias boolean DEFAULT false) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v f29_declaraciones := f29_para_cambio(p_id);
+  v_rem_f29 uuid := (v.detalle -> 'remanente' ->> 'f29_id')::uuid;
+  v_pendiente uuid;
+BEGIN
+  IF v.estado <> 'BORRADOR' THEN
+    RAISE EXCEPTION 'Solo se aprueba un F29 en borrador (está %)', lower(v.estado) USING ERRCODE = 'check_violation';
+  END IF;
+  IF contabilidad_hoy() < (v.periodo + interval '1 month')::date THEN
+    RAISE EXCEPTION 'El período % aún no termina', to_char(v.periodo, 'MM-YYYY') USING ERRCODE = 'check_violation';
+  END IF;
+
+  -- Todo lo que se usó para preparar la propuesta debe seguir vigente.
+  SELECT id INTO v_pendiente FROM rcv_importaciones WHERE empresa_id = v.empresa_id AND periodo = v.periodo
+    AND libro = 'COMPRA' AND seccion = 'PENDIENTE' AND estado = 'VIGENTE';
+  IF EXISTS (SELECT 1 FROM rcv_importaciones WHERE id IN (v.importacion_venta_id, v.importacion_compra_id) AND estado <> 'VIGENTE')
+     OR v_pendiente IS DISTINCT FROM (v.detalle ->> 'importacion_pendiente_id')::uuid THEN
+    RAISE EXCEPTION 'El RCV se reimportó después de preparar esta propuesta: prepárela de nuevo' USING ERRCODE = 'check_violation';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM tributario_tasas_ppm WHERE id = (v.detalle -> 'ppm' ->> 'id')::bigint AND estado = 'VIGENTE') THEN
+    RAISE EXCEPTION 'La tasa de PPM cambió después de preparar esta propuesta: prepárela de nuevo' USING ERRCODE = 'check_violation';
+  END IF;
+  IF (SELECT id FROM normativa_tabla('F29.REGLAS_RCV', v.periodo)) IS DISTINCT FROM v.reglas_id THEN
+    RAISE EXCEPTION 'Las reglas del F29 cambiaron después de preparar esta propuesta: prepárela de nuevo' USING ERRCODE = 'check_violation';
+  END IF;
+  IF (SELECT c.id FROM tributario_configuracion c
+      WHERE c.empresa_id = v.empresa_id AND c.estado = 'VIGENTE' AND c.vigente_desde <= v.periodo
+      ORDER BY c.vigente_desde DESC LIMIT 1) IS DISTINCT FROM (v.detalle -> 'configuracion' ->> 'id')::bigint THEN
+    RAISE EXCEPTION 'La configuración tributaria cambió después de preparar esta propuesta: prepárela de nuevo' USING ERRCODE = 'check_violation';
+  END IF;
+  IF v_rem_f29 IS NOT NULL THEN
+    IF NOT EXISTS (SELECT 1 FROM f29_declaraciones WHERE id = v_rem_f29 AND estado IN ('APROBADA', 'DECLARADA')) THEN
+      RAISE EXCEPTION 'El F29 del mes anterior, del que se tomó el remanente, ya no está vigente: prepare de nuevo' USING ERRCODE = 'check_violation';
+    END IF;
+  ELSIF EXISTS (SELECT 1 FROM f29_declaraciones WHERE empresa_id = v.empresa_id
+                AND periodo = (v.periodo - interval '1 month')::date AND estado IN ('BORRADOR', 'APROBADA', 'DECLARADA')) THEN
+    RAISE EXCEPTION 'Ahora hay un F29 del mes anterior en el sistema: prepare de nuevo para tomar su remanente' USING ERRCODE = 'check_violation';
+  END IF;
+
+  IF jsonb_array_length(v.advertencias) > 0 AND p_confirmo_advertencias IS NOT TRUE THEN
+    RAISE EXCEPTION 'La propuesta tiene % advertencia(s): revíselas y confirme para aprobar', jsonb_array_length(v.advertencias)
+      USING ERRCODE = 'check_violation';
+  END IF;
+  UPDATE f29_declaraciones SET estado = 'APROBADA', aprobado_por = app_usuario_id(), aprobado_en = now() WHERE id = p_id;
+  PERFORM contabilidad_auditar('F29_APROBADO', 'f29_declaraciones', p_id::text,
+    jsonb_build_object('periodo', v.periodo, 'version', v.version, 'advertencias_confirmadas', jsonb_array_length(v.advertencias),
+                       'total_a_pagar', v.codigos -> '91'), v.empresa_id);
 END;
 $$;
 

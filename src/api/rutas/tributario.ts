@@ -80,7 +80,7 @@ export async function rutasTributario(app: FastifyInstance, deps: Dependencias):
         desde: fecha.refine((f) => f.endsWith('-01'), 'Debe ser el primer día del mes'),
         regimen: z.enum(['PRO_PYME_TRANSPARENTE', 'PRO_PYME_GENERAL', 'SEMI_INTEGRADO', 'OTRO']),
         ivaComprasNoRecuperable: z.boolean(),
-        codigoIvaNoRecuperable: z.number().int().min(1).max(9).optional(),
+        codigoIvaNoRecuperable: z.union([z.literal(1), z.literal(2), z.literal(3), z.literal(4), z.literal(9)]).optional(),
         motivo: z.string().trim().min(10).max(500),
       }),
       req.body,

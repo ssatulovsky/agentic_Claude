@@ -2,7 +2,7 @@ import { sql } from 'kysely';
 import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { contextoDeUsuario, enContexto, type Trx } from '../src/db/conexion.js';
-import { aprobarF29, configurarTasaPpm, configurarTributario, listarF29, obtenerF29, prepararF29 } from '../src/tributario/f29.js';
+import { anularF29, aprobarF29, configurarTasaPpm, configurarTributario, listarF29, obtenerF29, prepararF29 } from '../src/tributario/f29.js';
 import { importarRcv } from '../src/tributario/rcv.js';
 import { leerRcvCsv } from '../src/tributario/rcvCsv.js';
 import { crearEscenario, type Escenario } from './escenario.js';
@@ -64,6 +64,18 @@ beforeAll(async () => {
       motivo: 'Régimen y operaciones exentas confirmados por la gerencia',
     }),
   );
+  // Para la prueba de crédito sin ventas afectas, junio se configura con compras con derecho a crédito.
+  for (const [desde, noRecuperable] of [['2026-06-01', false], ['2026-07-01', true]] as const) {
+    await comoContador((trx) =>
+      configurarTributario(trx, {
+        empresaId: e.empresaA1,
+        desde,
+        regimen: 'PRO_PYME_TRANSPARENTE',
+        ivaComprasNoRecuperable: noRecuperable,
+        motivo: 'Prueba: configuración por mes',
+      }),
+    );
+  }
 });
 afterAll(async () => {
   await e.cerrar();
@@ -244,16 +256,7 @@ describe('Otros impuestos, IVA no retenido y crédito sin ventas afectas', () =>
   });
 
   it('la propuesta muestra el código del otro impuesto y el IVA no retenido, y advierte el crédito sin ventas afectas', async () => {
-    // Para este caso, junio se configura con compras con derecho a crédito.
-    await comoContador((trx) =>
-      configurarTributario(trx, {
-        empresaId: e.empresaA1,
-        desde: '2026-06-01',
-        regimen: 'PRO_PYME_TRANSPARENTE',
-        ivaComprasNoRecuperable: false,
-        motivo: 'Prueba: mes con compras con derecho a crédito',
-      }),
-    );
+    // Junio está configurado con compras con derecho a crédito (ver beforeAll).
     await importar(
       'COMPRA',
       6,
@@ -296,5 +299,60 @@ describe('Configuración tributaria', () => {
         configurarTributario(trx, { empresaId: e.empresaA1, desde: '2026-11-01', regimen: 'OTRO', ivaComprasNoRecuperable: false, motivo: 'Intento del agente' }),
       ),
     ).rejects.toThrow(/una persona/u);
+  });
+});
+
+describe('IVA no recuperable: notas, DIN, activo fijo y cambios de configuración', () => {
+  const fila = (n: number, tipo: number, op: string, exento: number, neto: number, iva: number, total: number, netoAf = 0, ivaAf = 0) =>
+    `${n};${tipo};${op};76543210-3;PROVEEDOR SPA;${700 + n};10/05/2026;10/05/2026 10:00:00;;${exento};${neto};${iva};;;${total};${netoAf || ''};${ivaAf || ''};;0;0;;;;0;;;;`;
+
+  it('las notas, la DIN y el activo fijo sin derecho a crédito van a sus códigos', async () => {
+    const [abril] = await comoContador((trx) => listarF29(trx, e.empresaA1, 2026, 4));
+    await comoContador((trx) => anularF29(trx, abril!.id, 'Se rehace con la regla de IVA no recuperable'));
+    await importar(
+      'COMPRA',
+      5,
+      [
+        ENCABEZADO_COMPRAS,
+        fila(1, 33, 'Del Giro', 100, 1000, 190, 1290),
+        fila(2, 61, 'Del Giro', 50, 100, 19, 169),
+        fila(3, 56, 'Del Giro', 0, 200, 38, 238),
+        fila(4, 914, 'Del Giro', 0, 5000, 950, 5950),
+        fila(5, 33, 'Activo Fijo', 0, 0, 0, 2380, 2000, 380),
+      ].join('\n'),
+    );
+    await importar('VENTA', 5, [ENCABEZADO_VENTAS, '1;33;Del Giro;76111222-8;CLIENTE SPA;30;12/05/2026;12/05/2026;;;0;10000;1900;11900;0;0;0;0;0'].join('\n'));
+    const id = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2026, mes: 5, remanenteAnterior: 0 }));
+    const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id));
+    expect(noCero(f.codigos)).toMatchObject({ '564': 2, '521': 1000 - 100 + 200 + 2000, '562': 50, '566': 1, '560': 5000, '89': 1900 });
+    expect(f.codigos['520'] ?? 0).toBe(0);
+    expect(f.codigos['525'] ?? 0).toBe(0);
+    const reclasificar = f.advertencias.find((a) => a.tipo === 'RECLASIFICAR_EN_SII')!.detalle as { folio: number; iva: number }[];
+    expect(reclasificar.map((d) => [d.folio, d.iva])).toEqual([[701, 190], [702, 19], [703, 38], [705, 380]]);
+    expect(f.advertencias.map((a) => a.tipo)).toContain('CONFIG_NO_RECUPERABLE_CON_VENTAS_AFECTAS');
+
+    // Si la configuración cambia después de preparar, la propuesta no se aprueba.
+    await e.owner.query(
+      `INSERT INTO tributario_configuracion (empresa_id, vigente_desde, regimen, iva_compras_no_recuperable, motivo, registrado_por)
+       VALUES ($1, '2026-05-01', 'PRO_PYME_TRANSPARENTE', false, 'Cambio de prueba posterior', $2)`,
+      [e.empresaA1, e.usuarios.contadorA1.id],
+    );
+    await expect(comoContador((trx) => aprobarF29(trx, id, true))).rejects.toThrow(/configuración tributaria cambió/u);
+  });
+
+  it('no se configura un mes con F29 aprobados ni con códigos de IVA no recuperable inexistentes', async () => {
+    const configurar = (desde: string, codigo?: number) =>
+      comoContador((trx) =>
+        configurarTributario(trx, {
+          empresaId: e.empresaA1,
+          desde,
+          regimen: 'PRO_PYME_TRANSPARENTE',
+          ivaComprasNoRecuperable: true,
+          codigoIvaNoRecuperable: codigo,
+          motivo: 'Prueba de validaciones',
+        }),
+      );
+    await expect(configurar('2026-08-01')).rejects.toThrow(/F29 aprobados o declarados/u);
+    await expect(configurar('2026-11-01', 7)).rejects.toThrow(/check constraint|codigo_iva_no_recuperable/u);
   });
 });
