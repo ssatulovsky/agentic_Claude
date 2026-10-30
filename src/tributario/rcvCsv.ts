@@ -84,6 +84,7 @@ type Campo =
   | 'iva_fuera_plazo'
   | 'montos_especiales'
   | 'monto_total'
+  | 'indicador_nota_factura_compra'
   | 'ignorar';
 
 /** Encabezados conocidos, ya normalizados (minúsculas, sin tildes ni puntuación). */
@@ -124,7 +125,23 @@ const ALIAS: Record<string, Campo> = {
   'iva fuera de plazo': 'iva_fuera_plazo',
   'credito empresa constructora': 'montos_especiales',
   'iva terceros': 'montos_especiales',
+  // Otros impuestos de compras (se suman; el total los incluye).
+  'tabacos puros': 'otros_impuestos',
+  'tabacos cigarrillos': 'otros_impuestos',
+  'tabacos elaborados': 'otros_impuestos',
+  // IVA no retenido en facturas de compra con retención parcial: requiere revisión.
+  'iva no retenido': 'montos_especiales',
+  // Indicador (0/1) de nota de crédito o débito sobre una factura de compra.
+  'nce o nde sobre fact de compra': 'indicador_nota_factura_compra',
+  // Columnas descriptivas: no tienen montos.
   nro: 'ignorar',
+  'fecha acuse': 'ignorar',
+  'fecha acuse recibo': 'ignorar',
+  'fecha reclamo': 'ignorar',
+  'codigo otro impuesto': 'ignorar',
+  'codigo otro imp': 'ignorar',
+  'tasa otro impuesto': 'ignorar',
+  'tasa otro imp': 'ignorar',
 };
 
 const OPERACIONES: Record<string, TipoOperacion> = {
@@ -248,6 +265,15 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
     if (campo === 'ignorar') return;
     columnas.set(campo, [...(columnas.get(campo) ?? []), i]);
   });
+  // El SII ofrece dos descargas: "Resumen" (totales por tipo de documento) y "Detalle".
+  // El F29 necesita el detalle (tipo de compra o venta de cada documento).
+  if (!columnas.has('folio') && encabezado.some((n) => normalizarTexto(n) === 'total documentos')) {
+    throw new ErrorNegocio(
+      'RCV_ES_RESUMEN',
+      'Este archivo es el resumen del RCV. Descargue el detalle: en el Registro de Compras y Ventas, opción "Descargar Detalles".',
+      422,
+    );
+  }
   const faltantes = OBLIGATORIOS.filter((c) => !columnas.has(c));
   if (faltantes.length > 0) {
     throw new ErrorNegocio('RCV_FORMATO', `Faltan columnas obligatorias en el archivo: ${faltantes.join(', ')}.`, 422, {
@@ -337,6 +363,11 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
       sumas[campo] = total;
     }
     const otros = sumas.otros_impuestos ?? 0;
+
+    const indicador = valor('indicador_nota_factura_compra');
+    if (indicador !== '' && indicador !== '0') {
+      advertencias.push(`Fila ${nFila} (folio ${folio}): nota de crédito o débito sobre una factura de compra; revise su tratamiento en el F29.`);
+    }
 
     const codigoTexto = valor('codigo_iva_no_recuperable');
     const codigoNoRec = codigoTexto === '' ? null : /^\d{1,3}$/u.test(codigoTexto) ? Number(codigoTexto) : NaN;
