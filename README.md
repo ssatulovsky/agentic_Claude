@@ -111,7 +111,7 @@ Cada ejecución crea una base de datos nueva, aplica todas las migraciones y la 
 | `POST …/ejercicios/:id/solicitudes-reapertura` · `POST …/solicitudes-reapertura/:id/resolver` | Reapertura de un ejercicio cerrado con autorización del Directorio |
 | `GET/POST /api/empresas/:id/asientos` · `GET …/asientos/:id` · `POST …/asientos/:id/reversar` | Libro diario |
 | `GET /api/empresas/:id/mayor?cuenta=&desde=&hasta=` | Libro mayor |
-| `GET /api/empresas/:id/balance-8-columnas?desde=&hasta=` | Balance de comprobación y saldos |
+| `GET /api/empresas/:id/balance-8-columnas?hasta=` | Balance de comprobación y saldos, acumulado del ejercicio |
 
 ## Normativa cargada
 

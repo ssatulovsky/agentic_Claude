@@ -346,7 +346,7 @@ describe('Datos por empresa a través de la API', () => {
     });
     expect(descuadrado.statusCode).toBe(422);
     expect(descuadrado.json().error.mensaje).toMatch(/descuadrado/u);
-    const balance = await app.inject({ method: 'GET', url: `${base}/balance-8-columnas?desde=2026-01-01&hasta=2026-12-31`, cookies: c });
+    const balance = await app.inject({ method: 'GET', url: `${base}/balance-8-columnas?hasta=2026-12-31`, cookies: c });
     expect(balance.json()).toMatchObject({ cuadrado: true, sumas: { debitos: '250000.00' } });
     const mayor = await app.inject({ method: 'GET', url: `${base}/mayor?cuenta=1.1.02&desde=2026-10-01&hasta=2026-10-31`, cookies: c });
     expect(mayor.json().saldoFinal).toBe('250000.00');

@@ -19,7 +19,8 @@ import { exigirPermiso } from '../../seguridad/permisos.js';
 import { exigirSesion, paramEmpresa, validar, type Dependencias } from '../servidor.js';
 
 const fecha = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, 'Fecha en formato AAAA-MM-DD');
-const monto = z.union([z.number().nonnegative(), z.string().regex(/^\d+(\.\d{1,2})?$/u)]);
+// Montos sobre un billón deben enviarse como texto (precisión de los números JSON).
+const monto = z.union([z.number().nonnegative().max(999_999_999_999), z.string().regex(/^\d{1,16}(\.\d{1,2})?$/u)]);
 const motivo = z.string().trim().min(10).max(500);
 
 const cuerpoAsiento = z.object({
@@ -166,10 +167,10 @@ export async function rutasContabilidad(app: FastifyInstance, deps: Dependencias
 
   app.get('/empresas/:empresaId/balance-8-columnas', async (req) => {
     const { empresaId } = validar(paramEmpresa, req.params);
-    const q = validar(z.object({ desde: fecha, hasta: fecha }), req.query);
+    const q = validar(z.object({ hasta: fecha }), req.query);
     return enEmpresa(req.sesion!.usuarioId, empresaId, async (trx) => {
       await exigirPermiso(trx, empresaId, 'contabilidad.asientos.ver');
-      return balanceOchoColumnas(trx, empresaId, q.desde, q.hasta);
+      return balanceOchoColumnas(trx, empresaId, q.hasta);
     });
   });
 }

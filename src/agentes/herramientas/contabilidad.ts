@@ -5,27 +5,29 @@ import { aCentavos, deCentavos, formatoPesos } from '../../utilidades/montos.js'
 import type { DefinicionHerramienta } from '../tipos.js';
 
 const fecha = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u).describe('Fecha AAAA-MM-DD');
+// Números grandes como texto: un número JSON mayor que 2^53 pierde precisión en silencio.
 const monto = z
-  .union([z.number().nonnegative(), z.string().regex(/^\d+(\.\d{1,2})?$/u)])
-  .describe('Monto en pesos, con hasta 2 decimales');
+  .union([z.number().nonnegative().max(999_999_999_999), z.string().regex(/^\d{1,16}(\.\d{1,2})?$/u)])
+  .describe('Monto en pesos, con hasta 2 decimales; montos sobre un billón, como texto');
 
-export const consultarBalance: DefinicionHerramienta<{ desde: string; hasta: string }, unknown> = {
+export const consultarBalance: DefinicionHerramienta<{ hasta: string }, unknown> = {
   nombre: 'consultar_balance',
   descripcion:
-    'Balance de 8 columnas (comprobación y saldos) entre dos fechas: débitos, créditos, saldos, inventario, resultados y resultado del ejercicio.',
+    'Balance de 8 columnas (comprobación y saldos) acumulado del ejercicio hasta una fecha: débitos, créditos, saldos, inventario, resultados y resultado del ejercicio.',
   modulo: 'CONTABILIDAD',
   permiso: 'contabilidad.asientos.ver',
   autonomia: 'CONSULTAR',
-  entrada: z.object({ desde: fecha, hasta: fecha }),
+  entrada: z.object({ hasta: fecha }),
   async ejecutar({ trx, seguridad }, e) {
-    const b = await balanceOchoColumnas(trx, seguridad.empresaId, e.desde, e.hasta);
+    const b = await balanceOchoColumnas(trx, seguridad.empresaId, e.hasta);
     return { ...b, filas: b.filas.slice(0, 200), filasOmitidas: Math.max(b.filas.length - 200, 0) };
   },
 };
 
 export const consultarMayor: DefinicionHerramienta<{ cuenta: string; desde: string; hasta: string }, unknown> = {
   nombre: 'consultar_mayor',
-  descripcion: 'Libro mayor de una cuenta: saldo inicial, movimientos y saldo final entre dos fechas.',
+  descripcion:
+    'Libro mayor de una cuenta (o de una cuenta de agrupación con sus subcuentas) entre dos fechas del mismo ejercicio: saldo inicial, movimientos y saldo final.',
   modulo: 'CONTABILIDAD',
   permiso: 'contabilidad.asientos.ver',
   autonomia: 'CONSULTAR',

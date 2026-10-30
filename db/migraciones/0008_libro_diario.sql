@@ -77,10 +77,16 @@ CREATE TABLE periodos_contables (
 );
 CREATE INDEX periodos_contables_fechas_idx ON periodos_contables (empresa_id, fecha_inicio, fecha_termino);
 
+-- Fecha de hoy en Chile (las conexiones trabajan en UTC).
+CREATE FUNCTION contabilidad_hoy() RETURNS date
+LANGUAGE sql STABLE AS $$
+  SELECT (now() AT TIME ZONE 'America/Santiago')::date
+$$;
+
 -- ¿El ejercicio admite movimientos hoy? (abierto, o con reapertura vigente)
 CREATE FUNCTION contabilidad_ejercicio_admite_movimientos(e ejercicios_contables) RETURNS boolean
 LANGUAGE sql STABLE AS $$
-  SELECT e.estado = 'ABIERTO' OR (e.reabierto_hasta IS NOT NULL AND e.reabierto_hasta >= current_date)
+  SELECT e.estado = 'ABIERTO' OR (e.reabierto_hasta IS NOT NULL AND e.reabierto_hasta >= contabilidad_hoy())
 $$;
 
 -- ---------------------------------------------------------------------------
@@ -98,8 +104,8 @@ CREATE TABLE asientos (
   glosa                 text NOT NULL CHECK (length(trim(glosa)) > 0),
   documento_referencia  text,
   reversa_de            uuid UNIQUE REFERENCES asientos(id),
-  propuesta_id          uuid REFERENCES propuestas_agente(id),
-  total                 numeric(18, 2) NOT NULL CHECK (total > 0),
+  propuesta_id          uuid UNIQUE REFERENCES propuestas_agente(id),
+  total                 numeric(18, 2) NOT NULL CHECK (total > 0 AND total <> 'NaN'),
   registrado_por        uuid NOT NULL REFERENCES usuarios(id),
   registrado_en         timestamptz NOT NULL DEFAULT now(),
   UNIQUE (ejercicio_id, numero),
@@ -113,8 +119,8 @@ CREATE TABLE asiento_lineas (
   empresa_id       uuid NOT NULL REFERENCES empresas(id),
   linea            int NOT NULL CHECK (linea > 0),
   cuenta_id        uuid NOT NULL REFERENCES plan_cuentas(id),
-  debe             numeric(18, 2) NOT NULL DEFAULT 0 CHECK (debe >= 0),
-  haber            numeric(18, 2) NOT NULL DEFAULT 0 CHECK (haber >= 0),
+  debe             numeric(18, 2) NOT NULL DEFAULT 0 CHECK (debe >= 0 AND debe <> 'NaN'),
+  haber            numeric(18, 2) NOT NULL DEFAULT 0 CHECK (haber >= 0 AND haber <> 'NaN'),
   tercero_id       uuid REFERENCES terceros(id),
   centro_costo_id  uuid REFERENCES centros_costo(id),
   glosa            text,
@@ -143,7 +149,7 @@ CREATE TRIGGER asiento_lineas_sin_truncate BEFORE TRUNCATE ON asiento_lineas
 -- Defensa en profundidad: al confirmar la transacción, todo asiento debe tener al
 -- menos dos líneas y cuadrar exactamente con su total.
 CREATE FUNCTION contabilidad_verificar_cuadratura() RETURNS trigger
-LANGUAGE plpgsql AS $$
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   v_id    uuid;
   v_total numeric;
@@ -160,7 +166,7 @@ BEGIN
   SELECT coalesce(sum(debe), 0), coalesce(sum(haber), 0), count(*)
     INTO v_debe, v_haber, v_n
   FROM asiento_lineas WHERE asiento_id = v_id;
-  IF v_n < 2 OR v_debe <> v_haber OR v_debe <> v_total THEN
+  IF v_n < 2 OR v_debe <> v_haber OR v_debe <> v_total OR v_total = 'NaN' OR v_debe = 'NaN' THEN
     RAISE EXCEPTION 'Asiento descuadrado: debe %, haber %, total %, líneas %', v_debe, v_haber, v_total, v_n
       USING ERRCODE = 'check_violation';
   END IF;
@@ -294,6 +300,8 @@ DECLARE
   v_terceros  uuid[] := '{}';
   v_centros   uuid[] := '{}';
   v_glosas    text[] := '{}';
+  v_es_reversa boolean := p_tipo = 'REVERSA';
+  v_propuesta propuestas_agente;
 BEGIN
   IF p_tipo NOT IN ('NORMAL', 'APERTURA', 'AJUSTE', 'REVERSA') THEN
     RAISE EXCEPTION 'Tipo de asiento no permitido: %', p_tipo USING ERRCODE = 'check_violation';
@@ -303,6 +311,18 @@ BEGIN
   END IF;
   IF p_origen NOT IN ('MANUAL', 'AGENTE', 'MODULO') THEN
     RAISE EXCEPTION 'Origen no permitido: %', p_origen USING ERRCODE = 'check_violation';
+  END IF;
+  -- Un asiento de origen AGENTE solo nace de una propuesta real, de esta empresa,
+  -- pendiente (se está aprobando en esta misma transacción) y de la herramienta de asientos.
+  IF (p_origen = 'AGENTE') <> (p_propuesta IS NOT NULL) THEN
+    RAISE EXCEPTION 'Un asiento de agente debe venir de una propuesta aprobada, y solo ese' USING ERRCODE = 'check_violation';
+  END IF;
+  IF p_propuesta IS NOT NULL THEN
+    SELECT * INTO v_propuesta FROM propuestas_agente WHERE id = p_propuesta FOR UPDATE;
+    IF v_propuesta.id IS NULL OR v_propuesta.empresa_id <> p_empresa OR v_propuesta.estado <> 'PENDIENTE'
+       OR v_propuesta.herramienta <> 'proponer_asiento' THEN
+      RAISE EXCEPTION 'La propuesta % no es válida para registrar un asiento', p_propuesta USING ERRCODE = 'check_violation';
+    END IF;
   END IF;
   IF p_glosa IS NULL OR length(trim(p_glosa)) = 0 THEN
     RAISE EXCEPTION 'El asiento necesita una glosa' USING ERRCODE = 'check_violation';
@@ -332,6 +352,17 @@ BEGIN
     RAISE EXCEPTION 'El período %-% está cerrado', v_periodo.anio, lpad(v_periodo.mes::text, 2, '0')
       USING ERRCODE = 'check_violation';
   END IF;
+  -- El asiento de apertura va el primer día del ejercicio y hay uno solo vigente.
+  IF p_tipo = 'APERTURA' THEN
+    IF p_fecha <> v_ejercicio.fecha_inicio THEN
+      RAISE EXCEPTION 'El asiento de apertura debe tener fecha %', v_ejercicio.fecha_inicio USING ERRCODE = 'check_violation';
+    END IF;
+    IF EXISTS (SELECT 1 FROM asientos a WHERE a.ejercicio_id = v_ejercicio.id AND a.tipo = 'APERTURA'
+               AND NOT EXISTS (SELECT 1 FROM asientos r WHERE r.reversa_de = a.id)) THEN
+      RAISE EXCEPTION 'El ejercicio % ya tiene un asiento de apertura vigente; reverselo antes de registrar otro', v_ejercicio.anio
+        USING ERRCODE = 'check_violation';
+    END IF;
+  END IF;
 
   -- 1) Validar todas las líneas y calcular totales ANTES de escribir nada.
   FOR v_linea IN SELECT * FROM jsonb_array_elements(p_lineas) LOOP
@@ -342,6 +373,9 @@ BEGIN
     EXCEPTION WHEN others THEN
       RAISE EXCEPTION 'Línea %: monto inválido', v_n USING ERRCODE = 'check_violation';
     END;
+    IF v_debe = 'NaN' OR v_haber = 'NaN' OR v_debe > 9999999999999999.99 OR v_haber > 9999999999999999.99 THEN
+      RAISE EXCEPTION 'Línea %: monto inválido', v_n USING ERRCODE = 'check_violation';
+    END IF;
     IF v_debe < 0 OR v_haber < 0 OR v_debe <> round(v_debe, 2) OR v_haber <> round(v_haber, 2)
        OR (v_debe > 0) = (v_haber > 0) THEN
       RAISE EXCEPTION 'Línea %: debe indicar un monto positivo en el debe o en el haber (no en ambos), con hasta 2 decimales', v_n
@@ -352,7 +386,9 @@ BEGIN
     IF v_cuenta.id IS NULL THEN
       RAISE EXCEPTION 'Línea %: la cuenta % no existe', v_n, v_linea->>'cuenta' USING ERRCODE = 'check_violation';
     END IF;
-    IF NOT v_cuenta.imputable OR NOT v_cuenta.activa THEN
+    -- Una reversa replica el asiento original tal cual: no se le exigen las reglas
+    -- vigentes hoy (cuenta desactivada, tercero o centro de costo agregados después).
+    IF NOT v_es_reversa AND (NOT v_cuenta.imputable OR NOT v_cuenta.activa) THEN
       RAISE EXCEPTION 'Línea %: la cuenta % no es imputable o está inactiva', v_n, v_cuenta.codigo
         USING ERRCODE = 'check_violation';
     END IF;
@@ -360,22 +396,22 @@ BEGIN
     v_tercero := NULL;
     IF nullif(v_linea->>'tercero', '') IS NOT NULL THEN
       SELECT id INTO v_tercero FROM terceros
-      WHERE empresa_id = p_empresa AND rut = upper(replace(v_linea->>'tercero', '.', '')) AND activo;
+      WHERE empresa_id = p_empresa AND rut = upper(replace(v_linea->>'tercero', '.', '')) AND (activo OR v_es_reversa);
       IF v_tercero IS NULL THEN
         RAISE EXCEPTION 'Línea %: el tercero % no existe', v_n, v_linea->>'tercero' USING ERRCODE = 'check_violation';
       END IF;
-    ELSIF v_cuenta.requiere_tercero THEN
+    ELSIF v_cuenta.requiere_tercero AND NOT v_es_reversa THEN
       RAISE EXCEPTION 'Línea %: la cuenta % exige indicar un tercero', v_n, v_cuenta.codigo USING ERRCODE = 'check_violation';
     END IF;
 
     v_cc := NULL;
     IF nullif(v_linea->>'centro_costo', '') IS NOT NULL THEN
       SELECT id INTO v_cc FROM centros_costo
-      WHERE empresa_id = p_empresa AND codigo = upper(v_linea->>'centro_costo') AND activo;
+      WHERE empresa_id = p_empresa AND codigo = upper(v_linea->>'centro_costo') AND (activo OR v_es_reversa);
       IF v_cc IS NULL THEN
         RAISE EXCEPTION 'Línea %: el centro de costo % no existe', v_n, v_linea->>'centro_costo' USING ERRCODE = 'check_violation';
       END IF;
-    ELSIF v_cuenta.requiere_centro_costo THEN
+    ELSIF v_cuenta.requiere_centro_costo AND NOT v_es_reversa THEN
       RAISE EXCEPTION 'Línea %: la cuenta % exige un centro de costo', v_n, v_cuenta.codigo USING ERRCODE = 'check_violation';
     END IF;
 
@@ -440,6 +476,10 @@ BEGIN
   IF p_motivo IS NULL OR length(trim(p_motivo)) < 10 THEN
     RAISE EXCEPTION 'Indique el motivo de la reversa (al menos 10 caracteres)' USING ERRCODE = 'check_violation';
   END IF;
+  IF p_fecha < v_original.fecha THEN
+    RAISE EXCEPTION 'La reversa no puede tener fecha anterior al asiento original (%)', v_original.fecha
+      USING ERRCODE = 'check_violation';
+  END IF;
 
   SELECT jsonb_agg(jsonb_build_object(
            'cuenta', c.codigo, 'debe', l.haber, 'haber', l.debe,
@@ -471,12 +511,14 @@ BEGIN
     RAISE EXCEPTION 'El período no existe' USING ERRCODE = 'insufficient_privilege';
   END IF;
   v_usuario := contabilidad_exigir(v_periodo.empresa_id, 'contabilidad.periodos.administrar');
-  SELECT * INTO v_ejercicio FROM ejercicios_contables WHERE id = v_periodo.ejercicio_id;
-  IF NOT contabilidad_ejercicio_admite_movimientos(v_ejercicio) THEN
-    RAISE EXCEPTION 'El ejercicio % está cerrado', v_ejercicio.anio USING ERRCODE = 'check_violation';
-  END IF;
+  -- Cerrar siempre está permitido (también si venció una reapertura excepcional):
+  -- lo que se restringe es registrar, no ordenar el cierre.
   IF v_periodo.estado = 'CERRADO' THEN
     RAISE EXCEPTION 'El período ya está cerrado' USING ERRCODE = 'check_violation';
+  END IF;
+  IF v_periodo.fecha_termino >= contabilidad_hoy() THEN
+    RAISE EXCEPTION 'El mes %-% aún no termina; no se puede cerrar', v_periodo.anio, lpad(v_periodo.mes::text, 2, '0')
+      USING ERRCODE = 'check_violation';
   END IF;
   IF EXISTS (SELECT 1 FROM periodos_contables
              WHERE ejercicio_id = v_periodo.ejercicio_id AND mes < v_periodo.mes AND estado = 'ABIERTO') THEN
@@ -494,6 +536,7 @@ LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
 DECLARE
   v_periodo   periodos_contables;
   v_ejercicio ejercicios_contables;
+  v_reabiertos jsonb;
 BEGIN
   SELECT * INTO v_periodo FROM periodos_contables WHERE id = p_periodo FOR UPDATE;
   IF v_periodo.id IS NULL OR v_periodo.empresa_id IS DISTINCT FROM app_empresa_id() THEN
@@ -511,10 +554,17 @@ BEGIN
   IF p_motivo IS NULL OR length(trim(p_motivo)) < 10 THEN
     RAISE EXCEPTION 'Indique el motivo de la reapertura (al menos 10 caracteres)' USING ERRCODE = 'check_violation';
   END IF;
-  UPDATE periodos_contables SET estado = 'ABIERTO', cerrado_en = NULL, cerrado_por = NULL WHERE id = p_periodo;
+  -- Los meses posteriores ya cerrados se reabren también: sus saldos dependen de
+  -- este mes, y el orden de cierre se mantiene (se vuelven a cerrar uno a uno).
+  SELECT coalesce(jsonb_agg(jsonb_build_object('mes', mes, 'cerrado_por', cerrado_por, 'cerrado_en', cerrado_en) ORDER BY mes), '[]')
+    INTO v_reabiertos
+  FROM periodos_contables
+  WHERE ejercicio_id = v_periodo.ejercicio_id AND mes >= v_periodo.mes AND estado = 'CERRADO';
+  UPDATE periodos_contables SET estado = 'ABIERTO', cerrado_en = NULL, cerrado_por = NULL
+  WHERE ejercicio_id = v_periodo.ejercicio_id AND mes >= v_periodo.mes AND estado = 'CERRADO';
   PERFORM contabilidad_auditar('periodo.reabierto', 'periodos_contables', p_periodo::text,
     jsonb_build_object('anio', v_periodo.anio, 'mes', v_periodo.mes, 'motivo', trim(p_motivo),
-                       'cerrado_antes_por', v_periodo.cerrado_por, 'cerrado_antes_en', v_periodo.cerrado_en),
+                       'meses_reabiertos', v_reabiertos),
     v_periodo.empresa_id);
 END;
 $$;
@@ -537,6 +587,11 @@ BEGIN
   IF EXISTS (SELECT 1 FROM periodos_contables WHERE ejercicio_id = p_ejercicio AND estado = 'ABIERTO') THEN
     RAISE EXCEPTION 'Todos los meses del ejercicio deben estar cerrados' USING ERRCODE = 'check_violation';
   END IF;
+  IF EXISTS (SELECT 1 FROM ejercicios_contables e
+             WHERE e.empresa_id = v_ejercicio.empresa_id AND e.anio < v_ejercicio.anio
+               AND contabilidad_ejercicio_admite_movimientos(e)) THEN
+    RAISE EXCEPTION 'Primero debe cerrarse el ejercicio anterior' USING ERRCODE = 'check_violation';
+  END IF;
   UPDATE ejercicios_contables
   SET estado = 'CERRADO', cerrado_en = now(), cerrado_por = v_usuario, reabierto_hasta = NULL
   WHERE id = p_ejercicio;
@@ -554,6 +609,7 @@ DECLARE
   v_ejercicio ejercicios_contables;
   v_usuario   uuid;
   v_id        uuid;
+  v_vencida   uuid;
 BEGIN
   SELECT * INTO v_ejercicio FROM ejercicios_contables WHERE id = p_ejercicio FOR UPDATE;
   IF v_ejercicio.id IS NULL OR v_ejercicio.empresa_id IS DISTINCT FROM app_empresa_id() THEN
@@ -563,6 +619,15 @@ BEGIN
   IF v_ejercicio.estado <> 'CERRADO' OR contabilidad_ejercicio_admite_movimientos(v_ejercicio) THEN
     RAISE EXCEPTION 'Solo se solicita la reapertura de un ejercicio cerrado' USING ERRCODE = 'check_violation';
   END IF;
+  -- Una solicitud pendiente vencida no bloquea una nueva: se marca vencida y se registra.
+  FOR v_vencida IN
+    UPDATE solicitudes_reapertura_ejercicio SET estado = 'VENCIDA', resuelta_en = now()
+    WHERE ejercicio_id = p_ejercicio AND estado = 'PENDIENTE' AND vence_en <= now()
+    RETURNING id
+  LOOP
+    PERFORM contabilidad_auditar('ejercicio.reapertura_vencida', 'solicitudes_reapertura_ejercicio', v_vencida::text,
+      '{}'::jsonb, v_ejercicio.empresa_id);
+  END LOOP;
   INSERT INTO solicitudes_reapertura_ejercicio (empresa_id, ejercicio_id, motivo, acta_referencia, plazo_dias, solicitado_por)
   VALUES (v_ejercicio.empresa_id, p_ejercicio, trim(p_motivo), trim(p_acta), p_plazo_dias, v_usuario)
   RETURNING id INTO v_id;
@@ -598,10 +663,23 @@ BEGIN
   END IF;
   IF v_sol.vence_en <= now() THEN
     UPDATE solicitudes_reapertura_ejercicio SET estado = 'VENCIDA', resuelta_en = now() WHERE id = p_solicitud;
+    PERFORM contabilidad_auditar('ejercicio.reapertura_vencida', 'solicitudes_reapertura_ejercicio', p_solicitud::text,
+      '{}'::jsonb, v_sol.empresa_id);
     RETURN 'VENCIDA';
   END IF;
   IF v_usuario = v_sol.solicitado_por THEN
     RAISE EXCEPTION 'Quien solicita la reapertura no puede autorizarla' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  -- Controles contra directores creados para la ocasión: el director debe tener
+  -- doble factor activo y su cargo debe ser anterior a la solicitud.
+  IF NOT EXISTS (SELECT 1 FROM usuarios WHERE id = v_usuario AND totp_activo) THEN
+    RAISE EXCEPTION 'El director debe tener el doble factor activo para autorizar' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  IF NOT EXISTS (SELECT 1 FROM membresias_empresa
+                 WHERE usuario_id = v_usuario AND empresa_id = v_sol.empresa_id
+                   AND rol_codigo = 'DIRECTOR' AND creado_en < v_sol.creado_en) THEN
+    RAISE EXCEPTION 'Solo puede autorizar un director designado en la empresa antes de la solicitud'
+      USING ERRCODE = 'insufficient_privilege';
   END IF;
 
   -- La clave primaria impide que un mismo director vote dos veces.
@@ -623,10 +701,10 @@ BEGIN
   END IF;
 
   UPDATE solicitudes_reapertura_ejercicio SET estado = 'APROBADA', resuelta_en = now() WHERE id = p_solicitud;
-  UPDATE ejercicios_contables SET reabierto_hasta = current_date + v_sol.plazo_dias WHERE id = v_sol.ejercicio_id;
+  UPDATE ejercicios_contables SET reabierto_hasta = contabilidad_hoy() + v_sol.plazo_dias WHERE id = v_sol.ejercicio_id;
   PERFORM contabilidad_auditar('ejercicio.reabierto', 'ejercicios_contables', v_sol.ejercicio_id::text,
     jsonb_build_object('solicitud', p_solicitud, 'acta', v_sol.acta_referencia,
-                       'vigente_hasta', current_date + v_sol.plazo_dias, 'aprobaciones', v_aprobadas),
+                       'vigente_hasta', contabilidad_hoy() + v_sol.plazo_dias, 'aprobaciones', v_aprobadas),
     v_sol.empresa_id);
   RETURN 'APROBADA';
 END;
