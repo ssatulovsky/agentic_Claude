@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { enContexto, type Db } from '../db/conexion.js';
 import type { RegistroAgentes } from './catalogo.js';
 import { ejecutarHerramienta, registrarTraza, type Solicitante } from './ejecutor.js';
+import { avisoCifras, cifrasSinRespaldo } from './contralor.js';
 import type { MensajeConversacion, ModeloIA } from './tipos.js';
 
 export interface ResultadoConversacion {
@@ -9,6 +10,8 @@ export interface ResultadoConversacion {
   respuesta: string;
   mensajes: MensajeConversacion[];
   pasos: number;
+  /** Cifras de la respuesta sin respaldo en los datos consultados (control del Contralor). */
+  cifrasSinRespaldo: string[];
 }
 
 /**
@@ -25,6 +28,8 @@ export async function conversar(
     solicitante: Solicitante;
     mensaje: string;
     historial?: MensajeConversacion[];
+    /** Resultados de herramientas de turnos anteriores (respaldo de cifras ya consultadas). */
+    fuentesPrevias?: unknown[];
     conversacionId?: string;
     fecha?: string;
     maxPasos?: number;
@@ -41,7 +46,7 @@ export async function conversar(
   const especificaciones = registro.especificaciones(agente.codigo);
   const instrucciones = `${agente.instrucciones}\nFecha de hoy: ${fecha}.`;
 
-  const trazar = (paso: number, tipo: 'MENSAJE_USUARIO' | 'RESPUESTA' | 'ERROR', contenido: unknown) =>
+  const trazar = (paso: number, tipo: 'MENSAJE_USUARIO' | 'RESPUESTA' | 'ERROR' | 'CONTROL_CIFRAS', contenido: unknown) =>
     enContexto(
       db,
       {
@@ -67,9 +72,18 @@ export async function conversar(
   for (let paso = 1; paso <= maxPasos; paso++) {
     const respuesta = await modelo.responder({ instrucciones, mensajes, herramientas: especificaciones });
     if (respuesta.tipo === 'texto') {
-      mensajes.push({ rol: 'asistente', texto: respuesta.texto });
-      await trazar(paso, 'RESPUESTA', { texto: respuesta.texto });
-      return { conversacionId, respuesta: respuesta.texto, mensajes, pasos: paso };
+      // Control de cifras: toda cifra debe venir de una herramienta o de lo que dijo la persona.
+      // (No cuentan como fuente las respuestas anteriores del agente ni lo que él mismo puso en las herramientas.)
+      const fuentes = [
+        ...(opciones.fuentesPrevias ?? []),
+        ...mensajes.flatMap((m): unknown[] => (m.rol === 'herramienta' ? [m.resultado] : m.rol === 'usuario' ? [m.texto] : [])),
+      ];
+      const sinRespaldo = cifrasSinRespaldo(respuesta.texto, fuentes);
+      const texto = sinRespaldo.length > 0 ? respuesta.texto + avisoCifras(sinRespaldo) : respuesta.texto;
+      if (sinRespaldo.length > 0) await trazar(paso, 'CONTROL_CIFRAS', { cifrasSinRespaldo: sinRespaldo });
+      mensajes.push({ rol: 'asistente', texto });
+      await trazar(paso, 'RESPUESTA', { texto });
+      return { conversacionId, respuesta: texto, mensajes, pasos: paso, cifrasSinRespaldo: sinRespaldo };
     }
     mensajes.push({ rol: 'asistente', llamadas: respuesta.llamadas });
     for (const llamada of respuesta.llamadas) {
@@ -88,5 +102,5 @@ export async function conversar(
 
   const aviso = 'No pude completar la consulta dentro del límite de pasos. Por favor, reformúlela o divídala.';
   await trazar(maxPasos + 1, 'ERROR', { motivo: 'LIMITE_DE_PASOS' });
-  return { conversacionId, respuesta: aviso, mensajes, pasos: maxPasos };
+  return { conversacionId, respuesta: aviso, mensajes, pasos: maxPasos, cifrasSinRespaldo: [] };
 }

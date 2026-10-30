@@ -2,7 +2,7 @@ import { createHmac, randomInt } from 'node:crypto';
 import { sql } from 'kysely';
 import type { RegistroAgentes } from '../../agentes/catalogo.js';
 import { conversar } from '../../agentes/conversacion.js';
-import { historialConversacion } from '../../agentes/historial.js';
+import { fuentesDeConversacion, historialConversacion } from '../../agentes/historial.js';
 import type { MensajeConversacion } from '../../agentes/tipos.js';
 import { ocuparConsulta } from '../../agentes/limites.js';
 import { contextoDeUsuario, enContexto, sinContexto, type Db } from '../../db/conexion.js';
@@ -362,11 +362,13 @@ export class ServicioWhatsapp {
       identidad.ultima_actividad &&
       Date.now() - new Date(identidad.ultima_actividad).getTime() < INACTIVIDAD_CONVERSACION_MS;
     const conversacionId = vigente ? identidad.conversacion_id! : crypto.randomUUID();
-    const historial = await enContexto(this.deps.db, contextoDeUsuario(usuarioId, empresaId), async (trx) => {
+    const { historial, fuentesPrevias } = await enContexto(this.deps.db, contextoDeUsuario(usuarioId, empresaId), async (trx) => {
       if (!(await permisosEnEmpresa(trx, empresaId)).has('agentes.consultar')) {
         throw new ErrorNegocio('SIN_PERMISO', 'Su perfil no permite consultar a los agentes en esta empresa.', 403);
       }
-      return vigente ? historialConversacion(trx, empresaId, conversacionId) : ([] as MensajeConversacion[]);
+      if (!vigente) return { historial: [] as MensajeConversacion[], fuentesPrevias: [] as unknown[] };
+      const historial = await historialConversacion(trx, empresaId, conversacionId);
+      return { historial, fuentesPrevias: await fuentesDeConversacion(trx, empresaId, conversacionId) };
     });
     const liberar = ocuparConsulta(usuarioId, empresaId);
     try {
@@ -383,6 +385,7 @@ export class ServicioWhatsapp {
         solicitante: { usuarioId, empresaId, canal: 'WHATSAPP' },
         mensaje: texto,
         historial,
+        fuentesPrevias,
         conversacionId,
       });
       await guardar(empresaId, agente, conversacionId);

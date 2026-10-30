@@ -106,3 +106,6 @@ tr.total td { font-weight: 600; }
 h3 { margin-top: 1.5rem; }
 .codigo-vinculo { margin-top: 1rem; padding: 1rem; border: 1px dashed var(--borde); border-radius: 8px; }
 .codigo-vinculo .codigo { font-size: 1.6rem; font-weight: 700; letter-spacing: 0.08em; font-family: ui-monospace, monospace; margin: 0.5rem 0; }
+.aviso { margin-bottom: 0.75rem; color: var(--texto); background: color-mix(in srgb, #f5a623 14%, var(--superficie)); border-left: 3px solid #f5a623; padding: 0.5rem 0.75rem; border-radius: 4px; }
+.aviso ul, .exito ul { margin: 0.25rem 0 0; padding-left: 1.2rem; }
+article.tarjeta { margin-top: 1rem; }

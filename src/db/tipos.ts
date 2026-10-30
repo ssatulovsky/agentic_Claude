@@ -176,6 +176,22 @@ export interface TablaPropuestasAgente {
   motivo: string | null;
   creado_en: Timestamp;
   vence_en: Timestamp;
+  dictamen_contralor: 'CONFORME' | 'OBSERVADA' | null;
+  hallazgos_contralor: ColumnType<unknown, string | undefined, never>;
+}
+
+export interface TablaRevisionesContralor {
+  id: ColumnType<string, never, never>;
+  empresa_id: string;
+  agente_codigo: string;
+  herramienta: string;
+  solicitado_por: string;
+  conversacion_id: string | null;
+  propuesta_id: string | null;
+  dictamen: 'CONFORME' | 'OBSERVADA' | 'RECHAZADA';
+  hallazgos: ColumnType<unknown, string, never>;
+  resumen: string;
+  creado_en: Timestamp;
 }
 
 export interface TablaTrazasAgente {
@@ -192,7 +208,9 @@ export interface TablaTrazasAgente {
     | 'DENEGADO'
     | 'PROPUESTA_CREADA'
     | 'RESPUESTA'
-    | 'ERROR';
+    | 'ERROR'
+    | 'REVISION_CONTRALOR'
+    | 'CONTROL_CIFRAS';
   contenido: ColumnType<unknown, string, string>;
   creado_en: Timestamp;
 }
@@ -291,6 +309,7 @@ export interface BaseDatos {
   indicadores_economicos: TablaIndicadoresEconomicos;
   agentes_config_empresa: TablaAgentesConfigEmpresa;
   propuestas_agente: TablaPropuestasAgente;
+  revisiones_contralor: TablaRevisionesContralor;
   trazas_agente: TablaTrazasAgente;
   ejercicios_contables: TablaEjerciciosContables;
   periodos_contables: TablaPeriodosContables;
