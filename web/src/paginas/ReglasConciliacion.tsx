@@ -19,11 +19,17 @@ export function ReglasConciliacion({ empresa, puedeEditar }: { empresa: Empresa;
     try {
       const [r, c, t] = await Promise.all([
         api.get<Regla[]>(`/empresas/${empresa.id}/reglas-conciliacion`),
-        api.get<Imputacion[]>(`/empresas/${empresa.id}/imputaciones`).catch(() => [] as Imputacion[]),
+        api.get<Imputacion[]>(`/empresas/${empresa.id}/imputaciones`).catch(() => null),
         api.get<Tercero[]>(`/empresas/${empresa.id}/terceros`).catch(() => [] as Tercero[]),
       ]);
       setReglas(r);
-      setConceptos(c.filter((x) => x.cuenta));
+      setConceptos((c ?? []).filter((x) => x.cuenta));
+      if (c === null) {
+        setMensaje({
+          tipo: 'error',
+          texto: 'No tiene acceso a la parametrización contable: puede ver las reglas, pero para crearlas necesita el permiso de ver el plan de cuentas.',
+        });
+      }
       setTerceros(t);
     } catch (e) {
       setMensaje({ tipo: 'error', texto: e instanceof ErrorApi ? e.message : 'No se pudieron cargar las reglas.' });
@@ -76,7 +82,11 @@ export function ReglasConciliacion({ empresa, puedeEditar }: { empresa: Empresa;
     <section>
       <h2>Reglas de conciliación</h2>
       <p className="pequeno">Indican cómo contabilizar los movimientos del banco. El sistema propone el asiento; una persona lo aprueba.</p>
-      {mensaje && <p className={mensaje.tipo === 'ok' ? 'exito' : 'error'}>{mensaje.texto}</p>}
+      {mensaje && (
+        <p className={mensaje.tipo === 'ok' ? 'exito' : 'error'} role={mensaje.tipo === 'ok' ? 'status' : 'alert'}>
+          {mensaje.texto}
+        </p>
+      )}
       <table>
         <thead>
           <tr>
@@ -85,7 +95,9 @@ export function ReglasConciliacion({ empresa, puedeEditar }: { empresa: Empresa;
             <th>Se imputa a</th>
             <th>Tercero</th>
             <th>Glosa</th>
-            <th />
+            <th>
+              <span className="oculto">Acciones</span>
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -136,7 +148,12 @@ export function ReglasConciliacion({ empresa, puedeEditar }: { empresa: Empresa;
                 list="terceros"
                 placeholder="12345678-9"
                 value={form.rut}
-                onChange={(e) => setForm({ ...form, rut: e.target.value.trim(), tercero: form.tercero || e.target.value.trim() })}
+                onChange={(e) => {
+                  const rut = e.target.value.trim();
+                  // Si el RUT completo es de un tercero registrado, se propone como tercero del asiento.
+                  const tercero = !form.tercero && terceros.some((t) => t.rut === rut) ? rut : form.tercero;
+                  setForm({ ...form, rut, tercero });
+                }}
               />
               <datalist id="terceros">
                 {terceros.map((t) => (

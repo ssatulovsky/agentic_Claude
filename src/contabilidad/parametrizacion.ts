@@ -37,7 +37,7 @@ export async function listarImputaciones(trx: Trx, empresaId: string): Promise<I
            coalesce((SELECT jsonb_agg(jsonb_build_object('codigo', o.codigo, 'nombre', o.nombre, 'requiere_tercero', o.requiere_tercero)
                                       ORDER BY o.codigo)
                      FROM plan_cuentas o
-                     WHERE o.empresa_id = ${empresaId}::uuid AND o.imputable AND o.activa AND o.clasificacion = ANY (c.clasificaciones)),
+                     WHERE o.empresa_id = ${empresaId}::uuid AND contabilidad_cuenta_sirve(c, o)),
                     '[]') AS opciones
     FROM conceptos_imputacion c
     LEFT JOIN imputaciones i ON i.concepto = c.codigo AND i.empresa_id = ${empresaId}::uuid AND i.estado = 'VIGENTE'

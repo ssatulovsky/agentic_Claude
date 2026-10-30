@@ -1,6 +1,6 @@
 import fastifyStatic from '@fastify/static';
 import { existsSync } from 'node:fs';
-import { join } from 'node:path';
+import { join, sep } from 'node:path';
 import cookie from '@fastify/cookie';
 import rateLimit from '@fastify/rate-limit';
 import Fastify, { type FastifyInstance, type FastifyReply, type FastifyRequest } from 'fastify';
@@ -113,7 +113,7 @@ export async function crearServidor(deps: Dependencias): Promise<FastifyInstance
         ? "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; font-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
         : "default-src 'none'; frame-ancestors 'none'",
     );
-    reply.header('Cache-Control', 'no-store');
+    if (!reply.hasHeader('Cache-Control')) reply.header('Cache-Control', 'no-store');
     if (deps.config.NODE_ENV === 'production') {
       reply.header('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
     }
@@ -147,10 +147,29 @@ export async function crearServidor(deps: Dependencias): Promise<FastifyInstance
   // Interfaz web compilada (npm run build:web). Si no está compilada, solo se sirve la API.
   const raizWeb = deps.config.DIRECTORIO_WEB ?? join(process.cwd(), 'dist-web');
   if (existsSync(join(raizWeb, 'index.html'))) {
-    await app.register(fastifyStatic, { root: raizWeb, prefix: '/app/', index: ['index.html'], wildcard: false, list: false });
+    // Los archivos se indexan al arrancar: después de npm run build:web hay que reiniciar el servidor.
+    await app.register(fastifyStatic, {
+      root: raizWeb,
+      prefix: '/app/',
+      index: ['index.html'],
+      wildcard: false,
+      list: false,
+      cacheControl: false,
+      setHeaders: (res, ruta) => {
+        // Los archivos con hash no cambian nunca; index.html no se guarda en caché.
+        res.header('Cache-Control', ruta.includes(`${sep}assets${sep}`) ? 'public, max-age=31536000, immutable' : 'no-store');
+      },
+    });
     app.get('/', async (_req, reply) => reply.redirect('/app/'));
-    // Rutas de la aplicación de una sola página: devuelven index.html.
-    app.get('/app/*', async (_req, reply) => reply.type('text/html').sendFile('index.html'));
+    app.get('/app', async (_req, reply) => reply.redirect('/app/'));
+    // Rutas de la aplicación de una sola página: devuelven index.html. Un archivo de
+    // assets inexistente es 404 (no index.html, que el navegador rechazaría como script).
+    app.get('/app/*', async (req, reply) => {
+      if (req.url.startsWith('/app/assets/')) {
+        return reply.status(404).send({ error: { codigo: 'NO_ENCONTRADO', mensaje: 'Archivo no encontrado.' } });
+      }
+      return reply.type('text/html').sendFile('index.html');
+    });
   }
 
   await app.register(async (r) => rutasAutenticacion(r, deps), { prefix: '/api' });

@@ -38,6 +38,12 @@ export function App() {
   }, [cargarYo]);
 
   useEffect(() => {
+    const expirada = () => setYo(null);
+    window.addEventListener('erp:sesion-expirada', expirada);
+    return () => window.removeEventListener('erp:sesion-expirada', expirada);
+  }, []);
+
+  useEffect(() => {
     if (!empresa) return;
     api
       .get<{ permisos: string[] }>(`/empresas/${empresa.id}/permisos`)

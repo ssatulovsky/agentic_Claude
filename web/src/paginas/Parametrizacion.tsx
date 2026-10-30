@@ -70,8 +70,12 @@ export function Parametrizacion({ empresa, puedeEditar }: { empresa: Empresa; pu
       setHistorial(({ [concepto]: _, ...resto }) => resto);
       return;
     }
-    const h = await api.get<Historial[]>(`/empresas/${empresa.id}/imputaciones/${concepto}/historial`);
-    setHistorial((x) => ({ ...x, [concepto]: h }));
+    try {
+      const h = await api.get<Historial[]>(`/empresas/${empresa.id}/imputaciones/${concepto}/historial`);
+      setHistorial((x) => ({ ...x, [concepto]: h }));
+    } catch (e) {
+      setMensaje({ tipo: 'error', texto: e instanceof ErrorApi ? e.message : 'No se pudo cargar el historial.' });
+    }
   };
 
   if (!filas) return <p>{mensaje?.texto ?? 'Cargando…'}</p>;
@@ -92,14 +96,20 @@ export function Parametrizacion({ empresa, puedeEditar }: { empresa: Empresa; pu
           </button>
         )}
       </div>
-      {mensaje && <p className={mensaje.tipo === 'ok' ? 'exito' : 'error'}>{mensaje.texto}</p>}
+      {mensaje && (
+        <p className={mensaje.tipo === 'ok' ? 'exito' : 'error'} role={mensaje.tipo === 'ok' ? 'status' : 'alert'}>
+          {mensaje.texto}
+        </p>
+      )}
       <table>
         <thead>
           <tr>
             <th>Concepto</th>
             <th>Cuenta contable</th>
             <th>Motivo del cambio</th>
-            <th />
+            <th>
+              <span className="oculto">Acciones</span>
+            </th>
           </tr>
         </thead>
         <tbody>
@@ -158,6 +168,11 @@ function FilaConcepto(p: {
           {p.puedeEditar ? (
             <select value={p.seleccion} onChange={(e) => p.alCambiarCuenta(e.target.value)} aria-label={`Cuenta para ${f.nombre}`}>
               {!f.cuenta && <option value="">Sin configurar</option>}
+              {f.cuenta && !f.opciones.some((o) => o.codigo === f.cuenta!.codigo) && (
+                <option value={f.cuenta.codigo} disabled>
+                  {f.cuenta.codigo} {f.cuenta.nombre} (no válida para este concepto)
+                </option>
+              )}
               {f.opciones.map((o) => (
                 <option key={o.codigo} value={o.codigo}>
                   {o.codigo} {o.nombre}

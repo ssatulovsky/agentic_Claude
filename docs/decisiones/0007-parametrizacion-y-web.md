@@ -11,7 +11,7 @@ Fecha: 2026-10-30
 
 ## Decisiones
 
-- **Plan de cuentas base** (`plan_cuentas_base`). Es un plan tipo para una pyme chilena: 54 cuentas en 5 grupos. Se carga en una empresa con un botón, respeta las cuentas que la empresa ya tiene y se puede cargar varias veces sin duplicar nada.
+- **Plan de cuentas base** (`plan_cuentas_base`). Es un plan tipo para una pyme chilena: 57 cuentas en 5 grupos. Se carga en una empresa con un botón, respeta las cuentas que la empresa ya tiene y se puede cargar varias veces sin duplicar nada.
 - **Conceptos de imputación** (`conceptos_imputacion`). Son 23 conceptos: clientes, proveedores, IVA crédito y débito, remanente, PPM, retenciones, préstamos por cobrar y por pagar, cuenta corriente y retiros de socios, capital, resultados, ventas afectas y exentas, honorarios, gastos generales, IVA no recuperable y gastos bancarios. Cada concepto indica a qué clasificación de cuenta puede imputarse; por ejemplo, retiros de socios admite patrimonio, activo o pasivo.
 - **Imputaciones por empresa** (`imputaciones`).
   - Cada cambio exige un motivo.
@@ -36,6 +36,25 @@ Fecha: 2026-10-30
 - La interfaz muestra o permite editar según los permisos de la persona en la empresa elegida. La seguridad no depende de la interfaz: la base de datos vuelve a verificar todo.
 - Se revisó en navegador (escritorio y teléfono) con Playwright.
 - **Dependencias:** se actualizó `@fastify/static` a 10.1.8, porque las versiones anteriores tienen vulnerabilidades de recorrido de rutas. `npm audit` no informa vulnerabilidades.
+
+## Revisión independiente (30-10-2026)
+
+Todos los hallazgos se corrigieron y tienen prueba:
+
+| Gravedad | Hallazgo | Corrección |
+| --- | --- | --- |
+| Alta | Al cargar el plan base, un concepto se imputaba a una cuenta existente del mismo código aunque la empresa la usara para otra cosa (por ejemplo, Clientes a "Banco Santander"). | Solo se imputa a cuentas recién creadas o con el mismo nombre del plan base; el resto queda para configurar a mano. |
+| Media | La validación solo miraba la clasificación: se aceptaba Clientes en la depreciación acumulada, o Retiros en IVA débito. | Cada concepto define las combinaciones de clasificación y naturaleza que admite y si la cuenta debe exigir tercero. La pantalla solo ofrece cuentas válidas. |
+| Media | Al cambiar una imputación a una cuenta que exige tercero, las reglas sin tercero quedaban inservibles. | El cambio se rechaza nombrando las reglas afectadas. |
+| Media | Una cuenta imputada se podía desactivar. | No se puede desactivar mientras tenga un concepto asignado. |
+| Media | En la pantalla de reglas, el tercero se llenaba con el primer carácter del RUT. | Se propone el tercero solo cuando el RUT completo es de un tercero registrado. |
+| Baja | Errores ocultos (historial, falta de permiso para ver conceptos), assets inexistentes servidos como HTML, sin caché para archivos con hash, `/app` sin redirección, prueba web que podía pasar sin verificar, accesibilidad de mensajes, sesión expirada. | Corregidos. Las preguntas a la base se reportan, un asset inexistente da 404, los archivos con hash se guardan en caché un año, `/app` redirige, en la integración continua la prueba exige la interfaz compilada, los mensajes se anuncian a lectores de pantalla y una sesión expirada vuelve al ingreso. |
+
+Notas del revisor incorporadas al plan base: préstamos bancarios de corto plazo, impuesto a la renta por pagar y provisión de vacaciones; los préstamos bancarios exigen tercero (el banco).
+
+Queda pendiente con el contador el tratamiento de los retiros de socios al cierre. Se acumulan en el ejercicio, y el cierre anual automático solo salda ingresos y gastos, así que su traspaso contra resultados acumulados se registra como asiento manual hasta que el contador defina el criterio.
+
+**Operación:** el servidor indexa los archivos de la interfaz al arrancar. Después de `npm run build:web` hay que reiniciarlo.
 
 ## Puesta en marcha para InnovAgile
 

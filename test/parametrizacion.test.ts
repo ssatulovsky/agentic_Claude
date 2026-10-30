@@ -46,8 +46,8 @@ afterAll(async () => {
 describe('Plan de cuentas base e imputaciones', () => {
   it('carga el plan base sin tocar las cuentas existentes, una sola vez', async () => {
     const r = await comoContador((trx) => cargarPlanBase(trx, e.empresaA1));
-    // La empresa ya tenía 1, 1.1, 1.1.01 y 1.1.02.
-    expect(r).toEqual({ cuentas_creadas: 50, imputaciones_creadas: 23, conceptos_sin_configurar: [] });
+    // La empresa ya tenía 1, 1.1, 1.1.01 (Caja) y 1.1.02 (Banco Estado).
+    expect(r).toEqual({ cuentas_creadas: 53, imputaciones_creadas: 23, conceptos_sin_configurar: [] });
     expect(await comoContador((trx) => cargarPlanBase(trx, e.empresaA1))).toEqual({
       cuentas_creadas: 0,
       imputaciones_creadas: 0,
@@ -68,10 +68,16 @@ describe('Plan de cuentas base e imputaciones', () => {
 
   it('cambia la imputación solo a una cuenta de la clasificación permitida, con motivo e historial', async () => {
     await expect(comoContador((trx) => configurarImputacion(trx, e.empresaA1, 'RETIROS_SOCIOS', '4.1.01', 'Prueba'))).rejects.toThrow(
-      /PATRIMONIO o ACTIVO o PASIVO/u,
+      /PATRIMONIO o PASIVO o ACTIVO/u,
     );
     await expect(comoContador((trx) => configurarImputacion(trx, e.empresaA1, 'RETIROS_SOCIOS', '1', 'Cuenta de grupo'))).rejects.toThrow(
       /imputable/u,
+    );
+    // Naturaleza y tercero: la depreciación acumulada (activo acreedora) no sirve para clientes,
+    // ni el IVA débito (sin tercero) para retiros.
+    await expect(comoContador((trx) => configurarImputacion(trx, e.empresaA1, 'CLIENTES', '1.2.03', 'Prueba'))).rejects.toThrow(/activo deudora/u);
+    await expect(comoContador((trx) => configurarImputacion(trx, e.empresaA1, 'RETIROS_SOCIOS', '2.1.04', 'Prueba'))).rejects.toThrow(
+      /exija tercero/u,
     );
     await expect(comoAgente((trx) => configurarImputacion(trx, e.empresaA1, 'RETIROS_SOCIOS', '2.1.09', 'Intento del agente'))).rejects.toThrow(
       /una persona/u,
@@ -84,6 +90,40 @@ describe('Plan de cuentas base e imputaciones', () => {
     ]);
     await comoContador((trx) => configurarImputacion(trx, e.empresaA1, 'GASTOS_BANCARIOS', '5.2.01', 'Vuelve a su cuenta propia'));
     await expect(e.owner.query(`DELETE FROM imputaciones WHERE empresa_id = $1`, [e.empresaA1])).rejects.toThrow(/no se modifica/u);
+  });
+
+  it('no imputa sola una cuenta existente que la empresa usa para otra cosa', async () => {
+    await e.owner.query(
+      `INSERT INTO plan_cuentas (empresa_id, codigo, nombre, clasificacion, naturaleza, imputable, requiere_tercero, padre_id)
+       VALUES ($1, '1', 'Activo', 'ACTIVO', 'DEUDORA', false, false, NULL),
+              ($1, '1.1', 'Activo corriente', 'ACTIVO', 'DEUDORA', false, false, NULL),
+              ($1, '1.1.03', 'Banco Santander', 'ACTIVO', 'DEUDORA', true, true, NULL)`,
+      [e.empresaA0],
+    );
+    await e.owner.query(`INSERT INTO membresias_empresa (usuario_id, empresa_id, rol_codigo) VALUES ($1, $2, 'CONTADOR')`, [
+      e.usuarios.contadorA1.id,
+      e.empresaA0,
+    ]);
+    const r = await enContexto(e.db, contextoDeUsuario(e.usuarios.contadorA1.id, e.empresaA0), (trx) => cargarPlanBase(trx, e.empresaA0));
+    expect(r.conceptos_sin_configurar).toEqual(['CLIENTES']);
+  });
+
+  it('una cuenta asignada a un concepto no se desactiva; un cambio no deja reglas sin tercero', async () => {
+    await expect(e.owner.query(`UPDATE plan_cuentas SET activa = false WHERE empresa_id = $1 AND codigo = '5.2.01'`, [e.empresaA1])).rejects.toThrow(
+      /Gastos bancarios/u,
+    );
+    await e.owner.query(
+      `INSERT INTO suscripciones_modulo (empresa_id, modulo_codigo, pagador, vigente_desde) VALUES ($1, 'TESORERIA', 'EMPRESA', '2026-01-01')
+       ON CONFLICT DO NOTHING`,
+      [e.empresaA1],
+    );
+    await comoContador((trx) =>
+      crearRegla(trx, { empresaId: e.empresaA1, nombre: 'Depósitos en efectivo', texto: 'DEPOSITO EFECTIVO', sentido: 'ABONO', destino: 'CAJA', glosa: 'Depósito' }),
+    );
+    // Documentos por cobrar exige tercero: la regla sin tercero quedaría inservible.
+    await expect(comoContador((trx) => configurarImputacion(trx, e.empresaA1, 'CAJA', '1.1.04', 'Prueba'))).rejects.toThrow(
+      /Depósitos en efectivo/u,
+    );
   });
 
   it('las personas sin acceso al plan de cuentas no ven las imputaciones', async () => {

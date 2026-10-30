@@ -20,9 +20,25 @@ async function pedir<T>(metodo: string, ruta: string, cuerpo?: unknown): Promise
     credentials: 'same-origin',
     body: cuerpo === undefined ? undefined : JSON.stringify(cuerpo),
   });
-  const datos = (await r.json().catch(() => ({}))) as { error?: { codigo: string; mensaje: string } };
-  if (!r.ok) throw new ErrorApi(r.status, datos.error?.codigo ?? 'ERROR', datos.error?.mensaje ?? 'Ocurrió un error.');
+  const datos = (await r.json().catch(() => ({}))) as { error?: { codigo: string; mensaje: string; detalle?: unknown } };
+  if (r.status === 401 && ruta !== '/yo' && !ruta.startsWith('/auth/')) {
+    // La sesión expiró: la aplicación vuelve a la pantalla de ingreso.
+    window.dispatchEvent(new Event('erp:sesion-expirada'));
+  }
+  if (!r.ok) {
+    throw new ErrorApi(r.status, datos.error?.codigo ?? 'ERROR', mensajeConDetalle(datos.error?.mensaje ?? 'Ocurrió un error.', datos.error?.detalle));
+  }
   return datos as T;
+}
+
+/** Agrega al mensaje los campos que fallaron, cuando el servidor los informa. */
+function mensajeConDetalle(mensaje: string, detalle: unknown): string {
+  if (!Array.isArray(detalle)) return mensaje;
+  const partes = detalle
+    .map((d) => (typeof d === 'object' && d && 'mensaje' in d ? `${String((d as { campo?: unknown }).campo ?? '')}: ${String((d as { mensaje: unknown }).mensaje)}` : null))
+    .filter((x): x is string => x !== null)
+    .slice(0, 3);
+  return partes.length ? `${mensaje} (${partes.join('; ')})` : mensaje;
 }
 
 export const api = {
