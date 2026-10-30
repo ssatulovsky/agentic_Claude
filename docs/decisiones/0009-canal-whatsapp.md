@@ -63,7 +63,7 @@ Puente → ERP:
 
 ERP → puente:
 
-- `POST {WHATSAPP_PUENTE_URL}/enviar` → `{ "para": "+569…", "texto": "…" }`, firmado con la ruta
+- `POST {WHATSAPP_PUENTE_URL}/enviar` → `{ "para": "+569…", "texto": "…", "voz": "…opcional" }`, firmado con la ruta
   `POST /enviar` (textos de más de 4.000 caracteres se envían en varias partes).
 
 ## Comandos del chat
@@ -90,8 +90,16 @@ enviar las notas personales del titular; lo conversado con Meta AI se descarta. 
 transcriben en el ERP con Whisper local (`docker compose --profile voz`). Instrucciones en
 `puente-whatsapp/README.md`.
 
+## Respuestas con nota de voz
+
+Cada persona elige (web o `voz siempre | auto | nunca` en el chat) si las respuestas de los
+agentes llegan también como nota de voz; por omisión, cuando preguntó con voz. El texto se envía
+siempre, para que las cifras queden por escrito. El ERP prepara un texto hablable (sin formato,
+montos en palabras que se leen bien, a lo más ~700 caracteres) y lo manda al puente en el campo
+`voz` de `/enviar`; el puente lo sintetiza con Piper y lo convierte a OGG/Opus con ffmpeg, en el
+servidor, después de entregar el texto. Los comandos y avisos no van con voz.
+
 ## Pendiente
 
-- Respuestas por voz (texto a voz).
 - Avisar la caída del canal por correo a los administradores.
 - Los límites por persona viven en memoria del proceso (ver 0008).

@@ -12,6 +12,7 @@ import { contieneCredenciales } from '../../ia/sensibles.js';
 import { permisosEnEmpresa } from '../../seguridad/permisos.js';
 import type { CanalMensajeria } from './puente.js';
 import { mimeAudioAceptado, type Transcriptor } from './transcripcion.js';
+import { responderConVoz, textoParaVoz, type PreferenciaVoz } from './voz.js';
 
 export interface MensajeEntrante {
   /** Identificador del mensaje en WhatsApp (para no procesarlo dos veces). */
@@ -34,6 +35,7 @@ interface Identidad {
   agente_actual: string | null;
   conversacion_id: string | null;
   ultima_actividad: Date | null;
+  voz: PreferenciaVoz;
 }
 
 const AGENTE_POR_DEFECTO = 'GERENTE_VIRTUAL';
@@ -46,6 +48,7 @@ const AYUDA = [
   '• *empresas*: lista sus empresas; *empresa 2* elige la segunda.',
   '• *agentes*: lista los agentes; *agente tesorero* elige uno.',
   '• *nueva*: empieza una conversación nueva.',
+  '• *voz siempre*, *voz auto* (si pregunta con voz) o *voz nunca*: respuestas con nota de voz.',
   '• *desvincular*: desconecta este WhatsApp de su cuenta.',
   '',
   'Cualquier otro mensaje (texto o nota de voz) va al agente elegido. Las aprobaciones se hacen en la web.',
@@ -169,8 +172,8 @@ export class ServicioWhatsapp {
     );
   }
 
-  private async responder(id: number, telefono: string, texto: string, usuarioId: string | null, detalle: string | null = null) {
-    await this.deps.canal.enviar(telefono, texto);
+  private async responder(id: number, telefono: string, texto: string, usuarioId: string | null, detalle: string | null = null, voz?: string) {
+    await this.deps.canal.enviar(telefono, texto, voz ? { voz } : {});
     await this.marcar(id, 'RESPONDIDO', usuarioId, detalle);
   }
 
@@ -244,7 +247,9 @@ export class ServicioWhatsapp {
         return;
       }
       const respuesta = await this.atender(identidad, texto);
-      await this.responder(id, m.de, eco + respuesta, usuarioId);
+      // Nota de voz solo para respuestas del agente, según la preferencia de la persona.
+      const voz = respuesta.delAgente && responderConVoz(identidad.voz, m.tipo === 'AUDIO') ? textoParaVoz(respuesta.texto) : undefined;
+      await this.responder(id, m.de, eco + respuesta.texto, usuarioId, null, voz || undefined);
     } catch (e) {
       const mensaje =
         e instanceof ErrorNegocio ? e.message : 'Ocurrió un error al atender su mensaje. Intente de nuevo en unos minutos o use la web.';
@@ -274,7 +279,12 @@ export class ServicioWhatsapp {
   }
 
   /** Comandos del chat o consulta al agente elegido. */
-  private async atender(identidad: Identidad, texto: string): Promise<string> {
+  private async atender(identidad: Identidad, texto: string): Promise<{ texto: string; delAgente: boolean }> {
+    const r = await this.atenderComando(identidad, texto);
+    return typeof r === 'string' ? { texto: r, delAgente: false } : r;
+  }
+
+  private async atenderComando(identidad: Identidad, texto: string): Promise<string | { texto: string; delAgente: true }> {
     const usuarioId = identidad.usuario_id;
     const comando = normalizar(texto);
     const empresas = await enContexto(this.deps.db, contextoDeUsuario(usuarioId), async (trx) => {
@@ -323,6 +333,16 @@ export class ServicioWhatsapp {
       await guardar(empresaId, agente, null);
       return 'Listo, empezamos una conversación nueva.';
     }
+    const voz = /^voz (siempre|auto|nunca)$/u.exec(comando);
+    if (voz) {
+      const preferencia: PreferenciaVoz = voz[1] === 'siempre' ? 'SIEMPRE' : voz[1] === 'nunca' ? 'NUNCA' : 'SI_ENVIA_VOZ';
+      await enContexto(this.deps.db, contextoDeUsuario(usuarioId), (trx) => sql`SELECT whatsapp_preferir_voz(${preferencia})`.execute(trx));
+      return {
+        SIEMPRE: 'Listo: le responderé siempre también con nota de voz.',
+        SI_ENVIA_VOZ: 'Listo: le responderé con nota de voz cuando me pregunte con una.',
+        NUNCA: 'Listo: le responderé solo por escrito.',
+      }[preferencia];
+    }
     if (comando === 'desvincular') {
       await enContexto(this.deps.db, contextoDeUsuario(usuarioId), (trx) => sql`SELECT whatsapp_desvincular()`.execute(trx));
       return 'Este WhatsApp quedó desvinculado de su cuenta. Puede volver a vincularlo desde la web.';
@@ -366,7 +386,7 @@ export class ServicioWhatsapp {
         conversacionId,
       });
       await guardar(empresaId, agente, conversacionId);
-      return r.respuesta;
+      return { texto: r.respuesta, delAgente: true };
     } finally {
       liberar();
     }

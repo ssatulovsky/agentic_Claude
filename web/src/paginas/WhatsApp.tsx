@@ -5,7 +5,7 @@ interface Estado {
   canalConfigurado: boolean;
   numeroErp: string | null;
   telefonoRegistrado: string | null;
-  vinculo: { telefono: string; estado: string; verificado_en: string | null; vence_en: string | null } | null;
+  vinculo: { telefono: string; estado: string; verificado_en: string | null; vence_en: string | null; voz: string } | null;
 }
 interface Canal {
   configurado: boolean;
@@ -66,6 +66,16 @@ export function WhatsApp() {
     }
   };
 
+  const cambiarVoz = async (voz: string) => {
+    try {
+      await api.post('/yo/whatsapp/voz', { voz });
+      setMensaje({ tipo: 'ok', texto: 'Preferencia guardada.' });
+      await cargar();
+    } catch (e) {
+      setMensaje({ tipo: 'error', texto: e instanceof ErrorApi ? e.message : 'No se pudo guardar.' });
+    }
+  };
+
   const vinculado = estado?.vinculo?.estado === 'VERIFICADO';
   return (
     <section>
@@ -88,6 +98,17 @@ export function WhatsApp() {
             {vinculado && <span className="pequeno"> · vence el {fecha(estado.vinculo!.vence_en)}</span>}
           </p>
           {!estado.canalConfigurado && <p className="pequeno">El canal WhatsApp todavía no está configurado en este servidor.</p>}
+          {vinculado && (
+            <label>
+              Respuestas con nota de voz
+              <select value={estado.vinculo!.voz} onChange={(e) => void cambiarVoz(e.target.value)}>
+                <option value="SI_ENVIA_VOZ">Cuando pregunto con una nota de voz</option>
+                <option value="SIEMPRE">Siempre</option>
+                <option value="NUNCA">Nunca (solo texto)</option>
+              </select>
+              <span className="pequeno">El texto llega siempre, para que las cifras queden por escrito.</span>
+            </label>
+          )}
           <div className="fila">
             {estado.canalConfigurado && estado.telefonoRegistrado && (
               <button onClick={() => void vincular()}>{vinculado ? 'Renovar vínculo' : 'Vincular WhatsApp'}</button>

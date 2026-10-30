@@ -14,9 +14,12 @@ import { join } from 'node:path';
 import makeWASocket, { DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion, useMultiFileAuthState, type WASocket } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import { cabecerasFirmadas, CABECERA_FIRMA, CABECERA_MARCA, firmaValida } from '../../src/canales/whatsapp/firma.js';
+import { ColaSerial, leerConfiguracionVoz, limpiarTemporales, sintetizarNotaDeVoz } from './voz.js';
 import { ConjuntoAcotado, decidir, destinoPermitido, jidDesdeTelefono, leerConfiguracion, MARCA_PUENTE, telefonoDesdeJid, usuarioDeJid, type MensajeEntranteWa } from './nucleo.js';
 
 const config = leerConfiguracion(process.env);
+const configVoz = leerConfiguracionVoz(process.env);
+const colaVoz = new ColaSerial();
 const log = (evento: string, datos: Record<string, unknown> = {}) => console.log(JSON.stringify({ t: new Date().toISOString(), evento, ...datos }));
 
 let sock: WASocket | null = null;
@@ -64,6 +67,28 @@ async function enviarTexto(telefono: string, texto: string): Promise<void> {
   if (!sock || !conectado) throw new Error('WhatsApp no está conectado');
   const enviado = await sock.sendMessage(jidDesdeTelefono(telefono), { text: MARCA_PUENTE + texto });
   if (enviado?.key?.id) enviados.add(enviado.key.id);
+}
+
+/** Nota de voz con la respuesta (Piper + ffmpeg). Si falla, la respuesta ya llegó por escrito. */
+function enviarVoz(telefono: string, texto: string): void {
+  if (!configVoz) return;
+  const tarea = colaVoz.agregar(async () => {
+    if (!sock || !conectado) return;
+    const nota = await sintetizarNotaDeVoz(configVoz, texto);
+    if (!sock || !conectado) return;
+    const enviado = await sock.sendMessage(jidDesdeTelefono(telefono), { audio: nota.audio, mimetype: nota.mimetype, ptt: true, seconds: nota.segundos });
+    if (enviado?.key?.id) enviados.add(enviado.key.id);
+    log('voz_enviada', { segundos: nota.segundos });
+  });
+  if (!tarea) {
+    log('voz_descartada', { motivo: 'COLA_LLENA' });
+    return;
+  }
+  void tarea
+    .then((r) => {
+      if (r === 'VENCIDA') log('voz_descartada', { motivo: 'ESPERA_EXCESIVA' });
+    })
+    .catch((e) => log('error_voz', { error: (e as Error).message }));
 }
 
 async function conectar(): Promise<void> {
@@ -217,7 +242,7 @@ function responder(res: ServerResponse, estado: number, cuerpo: unknown) {
 
 createServer(async (req, res) => {
   try {
-    if (req.method === 'GET' && req.url === '/salud') return responder(res, 200, { conectado, modo: config.modo });
+    if (req.method === 'GET' && req.url === '/salud') return responder(res, 200, { conectado, modo: config.modo, voz: configVoz !== null });
     if (req.method !== 'POST' || req.url !== '/enviar') return responder(res, 404, { error: 'NO_ENCONTRADO' });
     const cuerpo = await leerCuerpo(req, 64 * 1024);
     const marca = req.headers[CABECERA_MARCA];
@@ -225,17 +250,20 @@ createServer(async (req, res) => {
     if (!firmaValida(config.secreto, typeof marca === 'string' ? marca : undefined, typeof firma === 'string' ? firma : undefined, 'POST /enviar', cuerpo)) {
       return responder(res, 401, { error: 'FIRMA_INVALIDA' });
     }
-    let d: { para?: unknown; texto?: unknown };
+    let d: { para?: unknown; texto?: unknown; voz?: unknown };
     try {
-      d = JSON.parse(cuerpo) as { para?: unknown; texto?: unknown };
+      d = JSON.parse(cuerpo) as { para?: unknown; texto?: unknown; voz?: unknown };
     } catch {
       return responder(res, 400, { error: 'JSON_INVALIDO' });
     }
     if (typeof d.para !== 'string' || typeof d.texto !== 'string' || !d.texto || d.texto.length > 4096) return responder(res, 422, { error: 'DATOS_INVALIDOS' });
+    if (d.voz !== undefined && (typeof d.voz !== 'string' || !d.voz.trim() || d.voz.length > 1500)) return responder(res, 422, { error: 'DATOS_INVALIDOS' });
     if (!destinoPermitido(d.para, { propio, modo: config.modo, permitidos: config.permitidos })) return responder(res, 403, { error: 'DESTINO_NO_PERMITIDO' });
     if (!conectado) return responder(res, 503, { error: 'DESCONECTADO' });
     await enviarTexto(d.para, d.texto);
-    return responder(res, 200, { enviado: true });
+    // La voz se genera después de responder: el texto ya llegó y el ERP no espera la síntesis.
+    if (typeof d.voz === 'string') enviarVoz(d.para, d.voz);
+    return responder(res, 200, { enviado: true, voz: typeof d.voz === 'string' && configVoz !== null });
   } catch (e) {
     if (e instanceof ErrorHttp) {
       if (!res.headersSent) responder(res, e.estado, { error: e.codigo });
@@ -247,6 +275,7 @@ createServer(async (req, res) => {
 }).listen(config.puerto, config.host, () => log('escuchando', { host: config.host, puerto: config.puerto }));
 
 setInterval(() => void latido(), 60_000).unref();
+if (configVoz) void limpiarTemporales().then((n) => n && log('temporales_borrados', { carpetas: n }));
 void conectar().catch((e) => {
   log('error_conexion', { error: (e as Error).message });
   process.exitCode = 1;
