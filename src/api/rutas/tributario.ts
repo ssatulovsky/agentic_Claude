@@ -63,10 +63,11 @@ export async function rutasTributario(app: FastifyInstance, deps: Dependencias):
         desde: fecha.refine((f) => f.endsWith('-01'), 'Debe ser el primer día del mes'),
         tasa: z.number().min(0).max(25),
         fuente: z.string().trim().min(5).max(300),
+        motivoReemplazo: z.string().trim().min(10).max(500).optional(),
       }),
       req.body,
     );
-    await enEmpresa(req.sesion!.usuarioId, empresaId, (trx) => configurarTasaPpm(trx, empresaId, d.desde, d.tasa, d.fuente));
+    await enEmpresa(req.sesion!.usuarioId, empresaId, (trx) => configurarTasaPpm(trx, empresaId, d.desde, d.tasa, d.fuente, d.motivoReemplazo));
     return reply.status(201).send({ desde: d.desde, tasa: d.tasa });
   });
 

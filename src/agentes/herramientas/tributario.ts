@@ -1,3 +1,4 @@
+import { sql } from 'kysely';
 import { z } from 'zod';
 import { listarF29, obtenerF29, prepararF29 } from '../../tributario/f29.js';
 import { resumenRcv } from '../../tributario/rcv.js';
@@ -63,7 +64,9 @@ export const prepararF29Agente: DefinicionHerramienta<
       .optional()
       .describe('Factor de proporcionalidad del IVA de uso común, informado por el contador'),
   }),
-  async ejecutar({ trx, seguridad }, e) {
+  async ejecutar({ trx, seguridad, propuestaId }, e) {
+    // Si una persona aprobó la propuesta del agente, el F29 queda con origen AGENTE_APROBADO.
+    if (propuestaId) await sql`SELECT set_config('app.propuesta_agente', ${propuestaId}, true)`.execute(trx);
     const id = await prepararF29(trx, { empresaId: seguridad.empresaId, ...e });
     return obtenerF29(trx, seguridad.empresaId, id);
   },

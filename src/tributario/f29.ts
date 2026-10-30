@@ -103,8 +103,17 @@ export async function anularF29(trx: Trx, id: string, motivo: string): Promise<v
   await sql`SELECT f29_anular(${id}::uuid, ${motivo})`.execute(trx);
 }
 
-export async function configurarTasaPpm(trx: Trx, empresaId: string, desde: string, tasa: number, fuente: string): Promise<void> {
-  await sql`SELECT tributario_configurar_ppm(${empresaId}::uuid, ${desde}::date, ${tasa}::numeric, ${fuente})`.execute(trx);
+export async function configurarTasaPpm(
+  trx: Trx,
+  empresaId: string,
+  desde: string,
+  tasa: number,
+  fuente: string,
+  motivoReemplazo?: string,
+): Promise<void> {
+  await sql`SELECT tributario_configurar_ppm(${empresaId}::uuid, ${desde}::date, ${tasa}::numeric, ${fuente}, ${motivoReemplazo ?? null})`.execute(
+    trx,
+  );
 }
 
 interface FilaF29 {

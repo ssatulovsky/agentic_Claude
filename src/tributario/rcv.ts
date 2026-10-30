@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { sql } from 'kysely';
 import type { Trx } from '../db/conexion.js';
+import { exigirPermiso } from '../seguridad/permisos.js';
 import { leerRcvCsv, type Libro } from './rcvCsv.js';
 
 /**
@@ -23,6 +24,8 @@ export interface ImportacionRcv {
 }
 
 export async function importarRcv(trx: Trx, i: ImportacionRcv) {
+  // El permiso se verifica antes de leer el archivo (que puede ser grande).
+  await exigirPermiso(trx, i.empresaId, 'tributario.rcv.importar');
   const lectura = leerRcvCsv(i.contenido, i.libro);
   const sha256 = createHash('sha256').update(i.contenido, 'utf8').digest('hex');
   const { rows } = await sql<{ id: string }>`
@@ -45,6 +48,7 @@ export async function importarRcv(trx: Trx, i: ImportacionRcv) {
     importacionId,
     ...resumen.rows[0]!,
     columnasNoReconocidas: lectura.columnasNoReconocidas,
+    advertencias: lectura.advertencias,
   };
 }
 

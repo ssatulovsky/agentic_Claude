@@ -44,6 +44,12 @@ export interface DocumentoRcv {
   neto_activo_fijo: number;
   iva_activo_fijo: number;
   otros_impuestos: number;
+  /** IVA retenido por el receptor (cambio de sujeto, total o parcial). */
+  iva_retenido: number;
+  /** IVA de notas de crédito emitidas fuera de plazo (no rebaja débito). */
+  iva_fuera_plazo: number;
+  /** Crédito de empresa constructora e IVA de terceros. */
+  montos_especiales: number;
   monto_total: number;
 }
 
@@ -52,6 +58,8 @@ export interface LecturaRcv {
   separador: string;
   /** Encabezados que no se usaron (se informan para validar el formato). */
   columnasNoReconocidas: string[];
+  /** Filas cuyo total no cuadra con la suma de sus montos (no impide importar). */
+  advertencias: string[];
 }
 
 type Campo =
@@ -72,6 +80,9 @@ type Campo =
   | 'neto_activo_fijo'
   | 'iva_activo_fijo'
   | 'otros_impuestos'
+  | 'iva_retenido'
+  | 'iva_fuera_plazo'
+  | 'montos_especiales'
   | 'monto_total'
   | 'ignorar';
 
@@ -108,6 +119,11 @@ const ALIAS: Record<string, Campo> = {
   'valor otro imp': 'otros_impuestos',
   'impto sin derecho a credito': 'otros_impuestos',
   'monto total': 'monto_total',
+  'iva retenido total': 'iva_retenido',
+  'iva retenido parcial': 'iva_retenido',
+  'iva fuera de plazo': 'iva_fuera_plazo',
+  'credito empresa constructora': 'montos_especiales',
+  'iva terceros': 'montos_especiales',
   nro: 'ignorar',
 };
 
@@ -126,6 +142,9 @@ const OPERACIONES: Record<string, TipoOperacion> = {
 const OBLIGATORIOS: Campo[] = ['tipo_documento', 'tipo_operacion', 'rut_contraparte', 'folio', 'fecha_documento', 'monto_total'];
 const TIPOS_NOTA_CREDITO = new Set([60, 61, 112]);
 const MAX_ERRORES = 20;
+/** Columnas que pueden repetirse y se suman. */
+const SUMABLES = new Set<Campo>(['otros_impuestos', 'iva_retenido', 'montos_especiales']);
+const corto = (v: string) => (v.length > 40 ? `${v.slice(0, 40)}…` : v);
 
 export function normalizarTexto(texto: string): string {
   return texto
@@ -206,7 +225,7 @@ function leerMonto(valor: string): number | null {
   let v = valor.trim().replace(/\s/gu, '');
   if (v === '') return 0;
   if (/^-?\d{1,3}(\.\d{3})+$/u.test(v)) v = v.replace(/\./gu, '');
-  if (!/^-?\d{1,15}$/u.test(v)) return null;
+  if (!/^-?\d{1,12}$/u.test(v)) return null;
   return Number(v);
 }
 
@@ -237,12 +256,13 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
     });
   }
   for (const [campo, indices] of columnas) {
-    if (indices.length > 1 && campo !== 'otros_impuestos') {
+    if (indices.length > 1 && !SUMABLES.has(campo)) {
       throw new ErrorNegocio('RCV_FORMATO', `La columna ${campo} aparece más de una vez en el archivo.`, 422);
     }
   }
 
   const errores: string[] = [];
+  const advertencias: string[] = [];
   const documentos: DocumentoRcv[] = [];
   const claves = new Set<string>();
 
@@ -254,36 +274,40 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
       return idx === undefined ? '' : (fila[idx] ?? '').trim();
     };
     const error = (msg: string) => errores.push(`Fila ${nFila}: ${msg}`);
+    // Una fila más corta que el encabezado está truncada: sus montos no se pueden leer como 0.
+    if (fila.length < encabezado.length) return error(`tiene ${fila.length} columnas y el encabezado ${encabezado.length}`);
+    if (fila.slice(encabezado.length).some((v) => v.trim() !== '')) return error('tiene más columnas que el encabezado');
+    if (valor('monto_total') === '') return error('falta el monto total');
 
     const tipoTexto = valor('tipo_documento');
     const tipo = /^\d{1,4}$/u.test(tipoTexto) ? Number(tipoTexto) : NaN;
-    if (!Number.isInteger(tipo) || tipo <= 0) return error(`tipo de documento inválido ("${tipoTexto}")`);
+    if (!Number.isInteger(tipo) || tipo <= 0) return error(`tipo de documento inválido ("${corto(tipoTexto)}")`);
 
     const operacionTexto = normalizarTexto(valor('tipo_operacion'));
     const operacion = OPERACIONES[operacionTexto];
-    if (!operacion) return error(`tipo de ${libro === 'COMPRA' ? 'compra' : 'venta'} no reconocido ("${valor('tipo_operacion')}")`);
+    if (!operacion) return error(`tipo de ${libro === 'COMPRA' ? 'compra' : 'venta'} no reconocido ("${corto(valor('tipo_operacion'))}")`);
     if (libro === 'VENTA' && !['DEL_GIRO', 'BIENES_RAICES', 'ACTIVO_FIJO'].includes(operacion)) {
-      return error(`tipo de venta no válido ("${valor('tipo_operacion')}")`);
+      return error(`tipo de venta no válido ("${corto(valor('tipo_operacion'))}")`);
     }
 
     const rut = normalizarRut(valor('rut_contraparte'));
-    if (!rutEsValido(rut)) return error(`RUT inválido ("${valor('rut_contraparte')}")`);
+    if (!rutEsValido(rut)) return error(`RUT inválido ("${corto(valor('rut_contraparte'))}")`);
 
     const folioTexto = valor('folio');
     if (!/^\d{1,18}$/u.test(folioTexto) || Number(folioTexto) <= 0 || !Number.isSafeInteger(Number(folioTexto))) {
-      return error(`folio inválido ("${folioTexto}")`);
+      return error(`folio inválido ("${corto(folioTexto)}")`);
     }
     const folio = Number(folioTexto);
 
     const fechaDocumento = leerFecha(valor('fecha_documento'));
-    if (!fechaDocumento) return error(`fecha del documento inválida ("${valor('fecha_documento')}")`);
+    if (!fechaDocumento) return error(`fecha del documento inválida ("${corto(valor('fecha_documento'))}")`);
     const recepcionTexto = valor('fecha_recepcion');
     const fechaRecepcion = recepcionTexto === '' ? null : leerFecha(recepcionTexto);
-    if (recepcionTexto !== '' && !fechaRecepcion) return error(`fecha de recepción inválida ("${recepcionTexto}")`);
+    if (recepcionTexto !== '' && !fechaRecepcion) return error(`fecha de recepción inválida ("${corto(recepcionTexto)}")`);
 
     const cantidadTexto = valor('cantidad');
     const cantidad = cantidadTexto === '' ? 1 : /^\d{1,9}$/u.test(cantidadTexto) ? Number(cantidadTexto) : NaN;
-    if (!Number.isInteger(cantidad) || cantidad <= 0) return error(`cantidad de documentos inválida ("${cantidadTexto}")`);
+    if (!Number.isInteger(cantidad) || cantidad <= 0) return error(`cantidad de documentos inválida ("${corto(cantidadTexto)}")`);
 
     const montos: Partial<Record<Campo, number>> = {};
     const camposMonto: Campo[] = [
@@ -298,20 +322,25 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
     ];
     for (const campo of camposMonto) {
       const m = leerMonto(valor(campo));
-      if (m === null) return error(`monto inválido en ${campo} ("${valor(campo)}")`);
+      if (m === null) return error(`monto inválido en ${campo} ("${corto(valor(campo))}")`);
       if (m < 0 && !TIPOS_NOTA_CREDITO.has(tipo)) return error(`monto negativo en ${campo} en un documento que no es nota de crédito`);
       montos[campo] = Math.abs(m);
     }
-    let otros = 0;
-    for (const idx of columnas.get('otros_impuestos') ?? []) {
-      const m = leerMonto(fila[idx] ?? '');
-      if (m === null) return error(`monto inválido en otros impuestos ("${fila[idx] ?? ''}")`);
-      otros += Math.abs(m);
+    const sumas: Partial<Record<Campo, number>> = {};
+    for (const campo of SUMABLES) {
+      let total = 0;
+      for (const idx of columnas.get(campo) ?? []) {
+        const m = leerMonto(fila[idx] ?? '');
+        if (m === null) return error(`monto inválido en ${campo} ("${corto(fila[idx] ?? '')}")`);
+        total += Math.abs(m);
+      }
+      sumas[campo] = total;
     }
+    const otros = sumas.otros_impuestos ?? 0;
 
     const codigoTexto = valor('codigo_iva_no_recuperable');
     const codigoNoRec = codigoTexto === '' ? null : /^\d{1,3}$/u.test(codigoTexto) ? Number(codigoTexto) : NaN;
-    if (Number.isNaN(codigoNoRec)) return error(`código de IVA no recuperable inválido ("${codigoTexto}")`);
+    if (Number.isNaN(codigoNoRec)) return error(`código de IVA no recuperable inválido ("${corto(codigoTexto)}")`);
 
     const clave = `${tipo}|${rut}|${folio}`;
     if (claves.has(clave)) return error(`documento repetido (tipo ${tipo}, RUT ${rut}, folio ${folio})`);
@@ -335,12 +364,33 @@ export function leerRcvCsv(contenido: string, libro: Libro): LecturaRcv {
       neto_activo_fijo: montos.neto_activo_fijo ?? 0,
       iva_activo_fijo: montos.iva_activo_fijo ?? 0,
       otros_impuestos: otros,
+      iva_retenido: sumas.iva_retenido ?? 0,
+      iva_fuera_plazo: 0,
+      montos_especiales: sumas.montos_especiales ?? 0,
       monto_total: montos.monto_total ?? 0,
     });
+    const doc = documentos[documentos.length - 1]!;
+    const fuera = leerMonto(valor('iva_fuera_plazo'));
+    if (fuera === null) return error(`monto inválido en iva_fuera_plazo ("${corto(valor('iva_fuera_plazo'))}")`);
+    doc.iva_fuera_plazo = Math.abs(fuera);
+    // Cuadratura: el total debe ser la suma de sus componentes. Si no cuadra, se advierte
+    // (el SII puede incluir componentes que este lector aún no reconoce).
+    const componentes =
+      doc.monto_exento +
+      doc.monto_neto +
+      doc.monto_iva +
+      doc.iva_no_recuperable +
+      doc.iva_uso_comun +
+      doc.neto_activo_fijo +
+      doc.iva_activo_fijo +
+      doc.otros_impuestos;
+    if (componentes !== doc.monto_total) {
+      advertencias.push(`Fila ${nFila} (folio ${folio}): el total ${doc.monto_total} no es la suma de sus montos (${componentes}).`);
+    }
   });
 
   if (errores.length > 0) {
     throw new ErrorNegocio('RCV_DATOS', `El archivo tiene errores; no se importó nada. ${errores[0]}`, 422, { errores });
   }
-  return { documentos, separador, columnasNoReconocidas };
+  return { documentos, separador, columnasNoReconocidas, advertencias };
 }

@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { RegistroAgentes } from '../src/agentes/catalogo.js';
-import { ejecutarHerramienta } from '../src/agentes/ejecutor.js';
+import { ejecutarHerramienta, resolverPropuesta } from '../src/agentes/ejecutor.js';
+import { sql } from 'kysely';
 import { contextoDeUsuario, enContexto, type Trx } from '../src/db/conexion.js';
 import { ErrorNegocio } from '../src/errores.js';
 import {
@@ -108,7 +109,8 @@ beforeAll(async () => {
   await e.owner.query(
     `INSERT INTO indicadores_economicos (tipo, fecha, valor, fuente, url_fuente) VALUES
        ('UTM', '2025-07-01', 68647, 'Prueba', 'https://www.sii.cl/valores_y_fechas/utm/utm2025.htm'),
-       ('UTM', '2025-08-01', 68785, 'Prueba', 'https://www.sii.cl/valores_y_fechas/utm/utm2025.htm')
+       ('UTM', '2025-08-01', 68785, 'Prueba', 'https://www.sii.cl/valores_y_fechas/utm/utm2025.htm'),
+       ('UTM', '2025-09-01', 69265, 'Prueba', 'https://www.sii.cl/valores_y_fechas/utm/utm2025.htm')
      ON CONFLICT DO NOTHING`,
   );
 });
@@ -309,8 +311,14 @@ describe('Propuesta de F29', () => {
     expect(c['91']).toBe(200_450);
     expect(f.origen).toBe('MANUAL');
     // La factura de compra (tipo 46) no se traspasa sola y queda como advertencia; también las compras pendientes y el ajuste.
-    expect(f.advertencias.map((a) => a.tipo)).toEqual(['DOCUMENTOS_SIN_REGLA', 'COMPRAS_PENDIENTES', 'AJUSTES_MANUALES']);
-    expect(JSON.stringify(f.advertencias[0])).toContain('"tipo_documento":46');
+    expect(f.advertencias.map((a) => a.tipo)).toEqual([
+      'FACTOR_INFORMADO',
+      'DOCUMENTOS_SIN_REGLA',
+      'COMPRAS_PENDIENTES',
+      'REMANENTE_INFORMADO',
+      'AJUSTES_MANUALES',
+    ]);
+    expect(JSON.stringify(f.advertencias[1])).toContain('"tipo_documento":46');
     expect(f.lineas.find((l) => l.codigo === '89')).toMatchObject({ descripcion: 'IVA determinado', valor: 43_700 });
   });
 
@@ -350,7 +358,7 @@ describe('Propuesta de F29', () => {
       prepararF29(trx, { empresaId: e.empresaA1, anio: 2026, mes: 6, remanenteAnterior: 0, factorProporcionalidad: 0.6 }),
     );
     const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, junio));
-    expect(f.advertencias.map((a) => a.tipo)).toEqual(['COMPRAS_PENDIENTES']);
+    expect(f.advertencias.map((a) => a.tipo)).toEqual(['FACTOR_INFORMADO', 'COMPRAS_PENDIENTES', 'REMANENTE_INFORMADO']);
     await comoContador((trx) => aprobarF29(trx, junio, true));
     expect((await comoContador((trx) => obtenerF29(trx, e.empresaA1, junio))).estado).toBe('APROBADA');
   });
@@ -406,7 +414,9 @@ describe('Remanente de crédito fiscal entre meses', () => {
     ).rejects.toThrow(/no se informa a mano/u);
     const agosto = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2025, mes: 8 }));
     const fa = await comoContador((trx) => obtenerF29(trx, e.empresaA1, agosto));
-    const reajustado = Math.round((171_000 * 68_785) / 68_647);
+    // Art. 27 D.L. 825: el remanente de julio se convierte a la UTM de agosto (mes en que se pagaba
+    // el impuesto de julio) y se reconvierte a la UTM de septiembre (mes en que se declara agosto).
+    const reajustado = Math.round((171_000 * 69_265) / 68_785);
     expect(fa.codigos['504']).toBe(reajustado);
     expect(fa.codigos['77']).toBe(reajustado - 19_000);
     expect((fa.detalle as { remanente: { origen: string } }).remanente.origen).toContain('F29 de 07-2025');
@@ -444,5 +454,164 @@ describe('Agente Analista Tributario', () => {
   it('preparar el F29 queda como propuesta si la empresa no autorizó al agente', async () => {
     const r = await usar(e.usuarios.contadorA1.id, 'preparar_f29', { anio: 2026, mes: 8, remanenteAnterior: 0 });
     expect(r).toMatchObject({ estado: 'PROPUESTA_CREADA' });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Hallazgos de la revisión independiente
+// ---------------------------------------------------------------------------
+describe('Revisión independiente: montos especiales, fechas y archivos truncados', () => {
+  const ventasEspeciales = (mes: string) =>
+    [
+      'Tipo Doc;Tipo Venta;Rut cliente;Folio;Fecha Docto;Monto Exento;Monto Neto;Monto IVA;Monto total;IVA Retenido Total;IVA Retenido Parcial;IVA fuera de plazo;IVA Terceros',
+      `33;Del Giro;${CLIENTE};301;05/${mes};0;1000000;190000;1190000;190000;0;0;0`,
+      `61;Del Giro;${CLIENTE};302;06/${mes};0;100000;19000;119000;0;0;19000;0`,
+    ].join('\n');
+
+  it('el IVA retenido y las notas de crédito fuera de plazo se advierten y obligan a confirmar', async () => {
+    await importar('VENTA', 2025, 1, ventasEspeciales('01/2025'));
+    await importar('COMPRA', 2025, 1, csvCompras([], '01/2025'));
+    const id = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2025, mes: 1, remanenteAnterior: 0 }));
+    const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id));
+    const especiales = f.advertencias.find((a) => a.tipo === 'DOCUMENTOS_CON_MONTOS_ESPECIALES');
+    expect(especiales?.detalle).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ concepto: 'IVA retenido (cambio de sujeto)', monto: 190_000, folios: [301] }),
+        expect.objectContaining({ concepto: 'IVA de nota de crédito fuera de plazo', monto: 19_000, folios: [302] }),
+      ]),
+    );
+    // Un remanente 0 informado a mano también se advierte.
+    expect(f.advertencias.map((a) => a.tipo)).toContain('REMANENTE_INFORMADO');
+    await expect(comoContador((trx) => aprobarF29(trx, id, false))).rejects.toThrow(/advertencia/u);
+  });
+
+  it('las ventas deben ser del mes y ninguna fecha puede ser posterior al período', async () => {
+    await expect(importar('VENTA', 2025, 2, csvVentas(VENTAS_JUNIO))).rejects.toThrow(/fechas que no corresponden a 02-2025/u);
+    await expect(importar('COMPRA', 2025, 2, csvCompras(COMPRAS_JUNIO))).rejects.toThrow(/fechas que no corresponden/u);
+    // Una compra emitida antes del período, pero recibida en él, sí corresponde.
+    const anterior = csvCompras([COMPRAS_JUNIO[0]!], '02/2025').replace('15/02/2025', '20/12/2024');
+    await expect(importar('COMPRA', 2025, 2, anterior)).resolves.toMatchObject({ cantidad_documentos: 1 });
+  });
+
+  it('una fila truncada o sin total se rechaza; un total que no cuadra se advierte', () => {
+    const base = `Tipo Doc;Tipo Venta;Rut cliente;Folio;Fecha Docto;Monto Neto;Monto IVA;Monto total\n`;
+    expect(() => leerRcvCsv(`${base}33;Del Giro;${CLIENTE};1;01/06/2026;1000000;190000`, 'VENTA')).toThrow(/columnas/u);
+    expect(() => leerRcvCsv(`${base}33;Del Giro;${CLIENTE};1;01/06/2026;1000000;190000;`, 'VENTA')).toThrow(/falta el monto total/u);
+    const l = leerRcvCsv(`${base}33;Del Giro;${CLIENTE};1;01/06/2026;1000000;190000;5;`, 'VENTA');
+    expect(l.advertencias[0]).toMatch(/Fila 2 \(folio 1\): el total 5 no es la suma/u);
+    expect(() => leerRcvCsv(`${base}33;Del Giro;${CLIENTE};1;01/06/2026;1000000000000;0;1000000000000`, 'VENTA')).toThrow(/monto inválido/u);
+  });
+
+  it('la base de datos rechaza importaciones nulas y el origen ROBOT_SII declarado por una persona', async () => {
+    const llamar = (origen: string, docs: string | null) =>
+      comoContador((trx) =>
+        sql`SELECT rcv_registrar_importacion(${e.empresaA1}::uuid, 'VENTA', 'REGISTRO', 2025, 3, ${origen}, 'x.csv',
+              ${'a'.repeat(64)}, ${docs}::jsonb)`.execute(trx),
+      );
+    await expect(llamar('ARCHIVO_SII', null)).rejects.toThrow(/Documentos inválidos/u);
+    await expect(llamar('ROBOT_SII', '[]')).rejects.toThrow(/proceso del sistema/u);
+  });
+
+  it('un ajuste sin monto se rechaza en la base de datos', async () => {
+    await expect(
+      comoContador((trx) =>
+        sql`SELECT f29_preparar(${e.empresaA1}::uuid, 2025, 1, 0, NULL, '[{"codigo": "151", "motivo": "Sin monto informado"}]'::jsonb)`.execute(trx),
+      ),
+    ).rejects.toThrow(/monto inválido/u);
+  });
+});
+
+describe('Revisión independiente: concurrencia y cadena de remanentes', () => {
+  const prepararMes = async (anio: number, mes: number, remanenteAnterior?: number) => {
+    const m = `${String(mes).padStart(2, '0')}/${anio}`;
+    await importar('VENTA', anio, mes, csvVentas([{ tipo: 33, op: 'Del Giro', folio: 400 + mes, neto: 100_000, iva: 19_000, total: 119_000 }], m));
+    await importar('COMPRA', anio, mes, csvCompras([], m));
+    return comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio, mes, remanenteAnterior }));
+  };
+  const diferido = () => {
+    let resolver!: () => void;
+    const promesa = new Promise<void>((r) => (resolver = r));
+    return { promesa, resolver };
+  };
+
+  it('aprobar espera a una reimportación en curso y luego exige preparar de nuevo', async () => {
+    const id = await prepararMes(2025, 3, 0);
+    const importado = diferido();
+    const soltar = diferido();
+    const a = comoContador(async (trx) => {
+      await importarRcv(trx, {
+        empresaId: e.empresaA1, libro: 'COMPRA', anio: 2025, mes: 3, archivoNombre: 'nuevo.csv',
+        contenido: csvCompras([{ tipo: 33, op: 'Del Giro', folio: 1, neto: 1000, iva: 190, total: 1190 }], '03/2025'),
+      });
+      importado.resolver();
+      await soltar.promesa;
+    });
+    await importado.promesa;
+    const b = comoContador((trx) => aprobarF29(trx, id, true));
+    await new Promise((r) => setTimeout(r, 200));
+    soltar.resolver();
+    await a;
+    await expect(b).rejects.toThrow(/reimportó/u);
+  });
+
+  it('anular un mes espera a que termine la preparación del siguiente y luego la respeta', async () => {
+    const mayo = await prepararMes(2025, 5, 0);
+    await comoContador((trx) => aprobarF29(trx, mayo, true));
+    await importar('VENTA', 2025, 6, csvVentas([], '06/2025'));
+    await importar('COMPRA', 2025, 6, csvCompras([], '06/2025'));
+    const preparado = diferido();
+    const soltar = diferido();
+    const a = comoContador(async (trx) => {
+      await prepararF29(trx, { empresaId: e.empresaA1, anio: 2025, mes: 6 });
+      preparado.resolver();
+      await soltar.promesa;
+    });
+    await preparado.promesa;
+    const b = comoContador((trx) => anularF29(trx, mayo, 'Error detectado en las ventas'));
+    await new Promise((r) => setTimeout(r, 200));
+    soltar.resolver();
+    await a;
+    await expect(b).rejects.toThrow(/mes siguiente/u);
+  });
+
+  it('no se informa el remanente a mano si el mes anterior tiene un F29 en el sistema', async () => {
+    await prepararMes(2025, 10, 0);
+    await expect(prepararMes(2025, 11, 0)).rejects.toThrow(/10-2025 está en borrador/u);
+    // Enero se prepara con remanente a mano; si después aparece diciembre, enero debe rehacerse.
+    const enero = await prepararMes(2026, 1, 0);
+    await prepararMes(2025, 12, 0);
+    await expect(comoContador((trx) => aprobarF29(trx, enero, true))).rejects.toThrow(/mes anterior en el sistema/u);
+  });
+
+  it('la propuesta del agente aprobada por una persona queda con origen AGENTE_APROBADO', async () => {
+    const r = await ejecutarHerramienta(e.db, registro, {
+      agenteCodigo: 'ANALISTA_TRIBUTARIO',
+      solicitante: { usuarioId: e.usuarios.contadorA1.id, empresaId: e.empresaA1 },
+      nombre: 'preparar_f29',
+      entrada: { anio: 2025, mes: 1, remanenteAnterior: 0 },
+      fecha: '2026-10-29',
+    });
+    expect(r.estado).toBe('PROPUESTA_CREADA');
+    if (r.estado !== 'PROPUESTA_CREADA') return;
+    const resuelta = await resolverPropuesta(e.db, registro, { usuarioId: e.usuarios.contadorA1.id, empresaId: e.empresaA1 }, r.propuestaId, 'APROBAR');
+    expect(resuelta.estado).toBe('EJECUTADA');
+    const f = resuelta.resultado as { origen: string; advertencias: { tipo: string; mensaje: string }[] };
+    expect(f.origen).toBe('AGENTE_APROBADO');
+    expect(f.advertencias.find((a) => a.tipo === 'REMANENTE_INFORMADO')?.mensaje).toMatch(/al agente/u);
+  });
+
+  it('una tasa de PPM mal digitada se reemplaza con motivo, y las propuestas previas deben rehacerse', async () => {
+    const id = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2025, mes: 3, remanenteAnterior: 0 }));
+    await expect(comoContador((trx) => configurarTasaPpm(trx, e.empresaA1, '2025-01-01', 0.3, 'Tasa corregida'))).rejects.toThrow(
+      /motivo del reemplazo/u,
+    );
+    await comoContador((trx) =>
+      configurarTasaPpm(trx, e.empresaA1, '2025-01-01', 0.3, 'Tasa corregida según F22', 'Se digitó 0,25 en vez de 0,3'),
+    );
+    await expect(comoContador((trx) => aprobarF29(trx, id, true))).rejects.toThrow(/tasa de PPM cambió/u);
+    const nuevo = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2025, mes: 3, remanenteAnterior: 0 }));
+    const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, nuevo));
+    expect(f.codigos['115']).toBe(0.3);
+    await expect(e.owner.query(`DELETE FROM tributario_tasas_ppm WHERE empresa_id = $1`, [e.empresaA1])).rejects.toThrow(/no se modifica/u);
   });
 });
