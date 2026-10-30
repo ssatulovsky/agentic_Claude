@@ -188,7 +188,8 @@ export interface NuevaRegla {
   rut?: string;
   texto?: string;
   sentido: 'ABONO' | 'CARGO' | 'AMBOS';
-  cuentaContable: string;
+  /** Código de cuenta ("2.1.08") o de concepto de imputación ("PRESTAMOS_POR_PAGAR"). */
+  destino: string;
   tercero?: string;
   glosa: string;
 }
@@ -196,7 +197,7 @@ export interface NuevaRegla {
 export async function crearRegla(trx: Trx, r: NuevaRegla): Promise<string> {
   const { rows } = await sql<{ id: string }>`
     SELECT tesoreria_crear_regla(${r.empresaId}::uuid, ${r.cuentaId ?? null}::uuid, ${r.nombre}, ${r.rut ?? null}, ${r.texto ?? null},
-      ${r.sentido}, ${r.cuentaContable}, ${r.tercero ?? null}, ${r.glosa}) AS id`.execute(trx);
+      ${r.sentido}, ${r.destino}, ${r.tercero ?? null}, ${r.glosa}) AS id`.execute(trx);
   return rows[0]!.id;
 }
 
@@ -211,16 +212,20 @@ interface Regla {
   rut_contraparte: string | null;
   texto: string | null;
   sentido: 'ABONO' | 'CARGO' | 'AMBOS';
+  /** Cuenta vigente: la de la regla o la que hoy tiene su concepto. */
   cuenta_contable: string;
+  concepto: string | null;
   tercero: string | null;
   glosa: string;
 }
 
 export async function listarReglas(trx: Trx, empresaId: string): Promise<Regla[]> {
   const { rows } = await sql<Regla>`
-    SELECT r.id, r.cuenta_id, r.nombre, r.rut_contraparte, r.texto, r.sentido, p.codigo AS cuenta_contable, t.rut AS tercero, r.glosa
+    SELECT r.id, r.cuenta_id, r.nombre, r.rut_contraparte, r.texto, r.sentido, p.codigo AS cuenta_contable, r.concepto,
+           t.rut AS tercero, r.glosa
     FROM reglas_conciliacion r
-    JOIN plan_cuentas p ON p.id = r.cuenta_contable_id
+    LEFT JOIN imputaciones i ON i.empresa_id = r.empresa_id AND i.concepto = r.concepto AND i.estado = 'VIGENTE'
+    JOIN plan_cuentas p ON p.id = coalesce(r.cuenta_contable_id, i.cuenta_contable_id)
     LEFT JOIN terceros t ON t.id = r.tercero_id
     WHERE r.empresa_id = ${empresaId}::uuid AND r.activa
     ORDER BY r.nombre`.execute(trx);
@@ -238,7 +243,7 @@ export type Sugerencia =
   | {
       movimientoId: number;
       tipo: 'CONTABILIZAR';
-      regla: { id: string; nombre: string; cuentaContable: string; tercero: string | null; glosa: string };
+      regla: { id: string; nombre: string; cuentaContable: string; concepto: string | null; tercero: string | null; glosa: string };
       motivo: string;
     }
   | { movimientoId: number; tipo: 'SIN_SUGERENCIA'; motivo: string };
@@ -302,7 +307,14 @@ export async function sugerirConciliacion(trx: Trx, empresaId: string, cuentaId:
       sugerencias.push({
         movimientoId: m.id,
         tipo: 'CONTABILIZAR',
-        regla: { id: regla.id, nombre: regla.nombre, cuentaContable: regla.cuenta_contable, tercero: regla.tercero, glosa: regla.glosa },
+        regla: {
+          id: regla.id,
+          nombre: regla.nombre,
+          cuentaContable: regla.cuenta_contable,
+          concepto: regla.concepto,
+          tercero: regla.tercero,
+          glosa: regla.glosa,
+        },
         motivo: `Regla "${regla.nombre}".`,
         evidencia,
       });

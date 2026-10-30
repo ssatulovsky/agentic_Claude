@@ -426,6 +426,55 @@ describe('Datos por empresa a través de la API', () => {
     expect(grande.statusCode).toBe(413);
   });
 
+  it('parametrización contable por la API', async () => {
+    const c = { [NOMBRE_COOKIE]: cookieContador };
+    const base = `/api/empresas/${e.empresaA1}`;
+    const carga = await app.inject({ method: 'POST', url: `${base}/plan-cuentas/cargar-base`, cookies: c, headers: { 'x-erp-solicitud': '1' } });
+    expect(carga.statusCode).toBe(200);
+    // En esta empresa la 1.1.03 es "Banco Santander" (creada en otra prueba): Clientes queda para configurar a mano.
+    expect(carga.json()).toMatchObject({ imputaciones_creadas: 22, conceptos_sin_configurar: ['CLIENTES'] });
+    const lista = await app.inject({ method: 'GET', url: `${base}/imputaciones`, cookies: c });
+    expect(lista.json().find((i: { concepto: string }) => i.concepto === 'RETIROS_SOCIOS').cuenta.codigo).toBe('3.1.02');
+    const malo = await app.inject({ method: 'PUT', url: `${base}/imputaciones/RETIROS_SOCIOS`, cookies: c, payload: { cuenta: '4.1.01', motivo: 'Prueba' } });
+    expect(malo.statusCode).toBe(422);
+    const ok = await app.inject({
+      method: 'PUT',
+      url: `${base}/imputaciones/RETIROS_SOCIOS`,
+      cookies: c,
+      payload: { cuenta: '2.1.09', motivo: 'Cuenta corriente del socio' },
+    });
+    expect(ok.statusCode).toBe(200);
+    const historial = await app.inject({ method: 'GET', url: `${base}/imputaciones/RETIROS_SOCIOS/historial`, cookies: c });
+    expect(historial.json()).toHaveLength(2);
+  });
+
+  it('sirve la interfaz web con su política de contenido, sin relajar la de la API', async () => {
+    const pagina = await app.inject({ method: 'GET', url: '/app/' });
+    // Sin compilar la interfaz, la prueba solo se omite fuera de la integración continua.
+    if (pagina.statusCode === 404 && !process.env.CI) return;
+    expect(pagina.statusCode).toBe(200);
+    expect(pagina.headers['content-type']).toMatch(/text\/html/u);
+    expect(pagina.headers['content-security-policy']).toMatch(/script-src 'self'/u);
+    const ruta = await app.inject({ method: 'GET', url: '/app/parametrizacion' });
+    expect(ruta.statusCode).toBe(200);
+    const salud = await app.inject({ method: 'GET', url: '/api/salud' });
+    expect(salud.headers['content-security-policy']).toBe("default-src 'none'; frame-ancestors 'none'");
+    expect(pagina.headers['cache-control']).toBe('no-store');
+    for (const url of ['/app/..%2f..%2fpackage.json', '/app/%2e%2e/%2e%2e/package.json', '/app/assets/..%2f..%2f..%2fpackage.json', '/app/.env']) {
+      const r = await app.inject({ method: 'GET', url });
+      expect(r.body).not.toContain('"dependencies"');
+      expect(r.body).not.toContain('DATABASE_URL');
+    }
+    expect((await app.inject({ method: 'GET', url: '/app/assets/no-existe.js' })).statusCode).toBe(404);
+    const sinBarra = await app.inject({ method: 'GET', url: '/app' });
+    expect(sinBarra.statusCode).toBe(302);
+    expect(sinBarra.headers.location).toBe('/app/');
+    const script = /src="\/app\/(assets\/[^"]+\.js)"/u.exec(pagina.body)![1]!;
+    const asset = await app.inject({ method: 'GET', url: `/app/${script}` });
+    expect(asset.statusCode).toBe(200);
+    expect(asset.headers['cache-control']).toBe('public, max-age=31536000, immutable');
+  });
+
   it('la cadena de la bitácora sigue íntegra después de todo lo anterior', async () => {
     const { rows } = await e.owner.query<{ alterado: string | null }>('SELECT bitacora_verificar() AS alterado');
     expect(rows[0]!.alterado).toBeNull();

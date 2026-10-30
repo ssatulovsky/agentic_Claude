@@ -31,6 +31,8 @@ const esquema = z.object({
   PROXIES_CONFIABLES: z.coerce.number().int().min(0).max(5).default(0),
   /** Nombre que se muestra en la aplicación de doble factor. */
   MFA_EMISOR: z.string().min(1).default('ERP Agentico'),
+  /** Carpeta de la interfaz web compilada; por defecto dist-web en el directorio de trabajo. */
+  DIRECTORIO_WEB: z.string().min(1).optional(),
 });
 
 export type Configuracion = z.infer<typeof esquema>;

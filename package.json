@@ -3,8 +3,10 @@
   "version": "0.1.0",
   "description": "ERP Agéntico multiempresa para Chile — núcleo transaccional con agentes de IA supervisados",
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p web",
+    "build": "tsc -p tsconfig.build.json && npm run build:web",
+    "build:web": "vite build --config web/vite.config.ts",
+    "dev:web": "vite --config web/vite.config.ts",
     "dev": "tsx watch src/index.ts",
     "start": "node dist/src/index.js",
     "db:migrar": "tsx src/db/migrar.ts",
@@ -18,6 +20,7 @@
   "dependencies": {
     "@fastify/cookie": "^11.1.5",
     "@fastify/rate-limit": "^11.2.1",
+    "@fastify/static": "^10.1.8",
     "@node-rs/argon2": "^2.2.2",
     "cfb": "^1.2.2",
     "fastify": "^5.12.7",
@@ -28,8 +31,14 @@
   "devDependencies": {
     "@types/node": "^22.20.5",
     "@types/pg": "^8.23.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.7.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "tsx": "^4.23.15",
     "typescript": "5.8",
+    "vite": "^6.4.5",
     "vitest": "^5.0.5"
   },
   "private": true,

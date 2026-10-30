@@ -233,7 +233,7 @@ describe('Conciliación', () => {
         nombre: 'Transferencias al socio',
         rut: SOCIO,
         sentido: 'CARGO',
-        cuentaContable: '2.1.01',
+        destino: '2.1.01',
         tercero: SOCIO,
         glosa: 'Transferencia al socio (cuenta corriente)',
       }),

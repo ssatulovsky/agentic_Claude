@@ -34,6 +34,8 @@ jobs:
       - run: npm ci
       - name: Revisión de tipos (modo estricto)
         run: npm run typecheck
+      - name: Interfaz web
+        run: npm run build:web
       - name: Pruebas contra PostgreSQL real
         run: npm test
       - name: Compilación
