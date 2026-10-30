@@ -42,6 +42,16 @@ const esquema = z.object({
   IA_TIMEOUT_MS: z.coerce.number().int().min(1_000).max(300_000).default(60_000),
   // Plazo total de una consulta a un agente (todos los pasos y modelos de respaldo).
   IA_PLAZO_CONVERSACION_MS: z.coerce.number().int().min(5_000).max(600_000).default(120_000),
+  // Canal WhatsApp: conector (puente) que recibe y envía mensajes. Ambos se autentican
+  // con firma HMAC-SHA256 con este secreto compartido.
+  WHATSAPP_PUENTE_URL: z.url().optional(),
+  WHATSAPP_PUENTE_SECRETO: z.string().min(32).optional(),
+  // Número de WhatsApp de la plataforma, para mostrarlo en la web al vincular.
+  WHATSAPP_NUMERO: z.string().regex(/^\+[1-9]\d{7,14}$/u).optional(),
+  // Transcripción de notas de voz: servidor compatible con /v1/audio/transcriptions (p. ej. Whisper local).
+  TRANSCRIPCION_URL: z.url().optional(),
+  TRANSCRIPCION_MODELO: z.string().min(1).default('whisper-1'),
+  TRANSCRIPCION_API_KEY: z.string().min(1).optional(),
 });
 
 export type Configuracion = z.infer<typeof esquema>;

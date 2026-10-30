@@ -10,6 +10,8 @@ import type { DefinicionHerramienta, MotivoDenegacion, ResultadoHerramienta } fr
 export interface Solicitante {
   usuarioId: string;
   empresaId: string;
+  /** Canal de la consulta. Por WhatsApp nada se ejecuta sin aprobación en la web (sin doble factor por mensaje). */
+  canal?: 'WEB' | 'WHATSAPP';
 }
 
 export interface PeticionHerramienta {
@@ -144,7 +146,9 @@ export async function ejecutarHerramienta(db: Db, registro: RegistroAgentes, p: 
 
     const ejecutaDirecto =
       herramienta.autonomia === 'CONSULTAR' ||
-      (herramienta.autonomia === 'EJECUTAR_CON_AVISO' && config?.autonomia_maxima === 'EJECUTAR_CON_AVISO');
+      (herramienta.autonomia === 'EJECUTAR_CON_AVISO' &&
+        config?.autonomia_maxima === 'EJECUTAR_CON_AVISO' &&
+        p.solicitante.canal !== 'WHATSAPP');
 
     if (!ejecutaDirecto) {
       const resumen = herramienta.resumir?.(entrada.data) ?? `${herramienta.nombre}: ${JSON.stringify(entrada.data)}`;

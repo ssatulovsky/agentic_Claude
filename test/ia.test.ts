@@ -12,7 +12,7 @@ import { ErrorProveedor } from '../src/ia/proveedores/comun.js';
 import { ModeloGemini } from '../src/ia/proveedores/gemini.js';
 import { ModeloOllama } from '../src/ia/proveedores/ollama.js';
 import { contieneCredenciales, filtrarTexto, filtrarValor } from '../src/ia/sensibles.js';
-import { ocuparConsulta } from '../src/api/rutas/agentes.js';
+import { ocuparConsulta } from '../src/agentes/limites.js';
 import { configurarPolitica, reporteUso } from '../src/ia/uso.js';
 import { ServicioAutenticacion } from '../src/seguridad/autenticacion.js';
 import { base32Decodificar, codigoParaPaso, pasoTotp } from '../src/seguridad/totp.js';
