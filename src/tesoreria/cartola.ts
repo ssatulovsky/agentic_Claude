@@ -143,7 +143,8 @@ export function leerCartola(contenido: Buffer): CartolaLeida {
   // Cabecera (pares etiqueta/valor) hasta la fila de títulos de la tabla.
   const cab: Partial<Cabecera> = {};
   let titulos = -1;
-  for (let i = 0; i < filas.length; i++) {
+  // La tabla empieza dentro de las primeras filas (cabecera corta).
+  for (let i = 0; i < Math.min(filas.length, 60); i++) {
     const celdas = filas[i]!.map((c) => normalizarTexto(texto(c)));
     if (celdas.includes('fecha') && celdas.includes('descripcion') && celdas.some((c) => c.startsWith('cargo')) && celdas.some((c) => c.startsWith('abono'))) {
       titulos = i;
@@ -187,6 +188,10 @@ export function leerCartola(contenido: Buffer): CartolaLeida {
       errores.push(`Fila ${n}: monto inválido`);
       continue;
     }
+    if (abono < 0) {
+      errores.push(`Fila ${n}: abono negativo; las reversas de abonos van como cargo`);
+      continue;
+    }
     if ((cargo !== 0) === (abono !== 0)) {
       errores.push(`Fila ${n}: debe tener un cargo o un abono (y no ambos)`);
       continue;
@@ -214,6 +219,11 @@ export function leerCartola(contenido: Buffer): CartolaLeida {
   const abonos = movimientos.filter((m) => m.monto > 0).reduce((s, m) => s + m.monto, 0);
   const cargos = movimientos.filter((m) => m.monto < 0).reduce((s, m) => s - m.monto, 0);
 
+  // Sin saldo final informado ni saldo diario en cada línea, nada permitiría verificar
+  // que la cartola esté completa.
+  if (numeroCampo('saldo_final') === null && movimientos.some((m) => m.saldo === null)) {
+    throw new ErrorNegocio('CARTOLA_FORMATO', 'La cartola debe informar el saldo final o el saldo diario de cada movimiento.', 422);
+  }
   let saldoAnterior = numeroCampo('saldo_anterior');
   if (saldoAnterior === null) {
     // Sin cabecera: el saldo anterior se deduce del saldo diario de la primera línea.

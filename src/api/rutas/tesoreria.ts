@@ -18,7 +18,13 @@ import {
 } from '../../tesoreria/conciliacion.js';
 import { exigirSesion, paramEmpresa, validar, type Dependencias } from '../servidor.js';
 
-const fecha = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u, 'Fecha en formato AAAA-MM-DD');
+const fecha = z
+  .string()
+  .regex(/^\d{4}-\d{2}-\d{2}$/u, 'Fecha en formato AAAA-MM-DD')
+  .refine((f) => {
+    const d = new Date(`${f}T00:00:00Z`);
+    return !Number.isNaN(d.getTime()) && d.toISOString().startsWith(f);
+  }, 'Fecha inexistente');
 const motivo = z.string().trim().min(10).max(500);
 const cuentaContable = z.string().regex(/^[0-9]+(\.[0-9]+)*$/u);
 const rut = z.string().trim().regex(/^\d{1,8}-[\dkK]$/u);

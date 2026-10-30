@@ -415,6 +415,15 @@ describe('Datos por empresa a través de la API', () => {
     expect(malo.statusCode).toBe(422);
     const movs = await app.inject({ method: 'GET', url: `${base}/cuentas-bancarias/${cuenta.json().id}/movimientos?pendientes=si`, cookies: c });
     expect(movs.json()).toHaveLength(12);
+    const fechaMala = await app.inject({ method: 'GET', url: `${base}/cuentas-bancarias/${cuenta.json().id}/movimientos?hasta=2026-02-30`, cookies: c });
+    expect(fechaMala.statusCode).toBe(422);
+    const grande = await app.inject({
+      method: 'POST',
+      url: `${base}/cuentas-bancarias/${cuenta.json().id}/cartolas`,
+      cookies: c,
+      payload: { archivoNombre: 'x.xls', contenidoBase64: 'A'.repeat(15 * 1024 * 1024) },
+    });
+    expect(grande.statusCode).toBe(413);
   });
 
   it('la cadena de la bitácora sigue íntegra después de todo lo anterior', async () => {

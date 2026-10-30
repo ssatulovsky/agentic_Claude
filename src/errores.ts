@@ -39,6 +39,9 @@ export function traducirErrorBaseDatos(error: unknown): ErrorNegocio | null {
       return new ErrorNegocio('MONTO_FUERA_DE_RANGO', 'Un monto excede el máximo permitido.', 422);
     case '57014':
       return new ErrorNegocio('OPERACION_LENTA', 'La operación tardó demasiado. Intente con un archivo más pequeño o más tarde.', 503);
+    case '22007':
+    case '22008':
+      return new ErrorNegocio('FECHA_INVALIDA', 'Fecha inválida.', 422);
     case '22P02':
       return new ErrorNegocio('FORMATO_INVALIDO', 'Formato de dato inválido.', 422);
     default:

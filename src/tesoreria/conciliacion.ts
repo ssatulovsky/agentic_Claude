@@ -106,11 +106,18 @@ export interface LineaBanco {
   tercero: string | null;
   anulada: boolean;
   conciliacion_id: string | null;
+  /** Fecha del asiento que reversó a este, si lo hay. */
+  reversado_el: string | null;
+  /** Si este asiento es una reversa, fecha del asiento original. */
+  reversa_de_fecha: string | null;
+  /** Apertura o cierre generados por el sistema (repiten saldos de otro ejercicio). */
+  arrastre: boolean;
 }
 
 export async function lineasBanco(trx: Trx, empresaId: string, cuentaId: string, hasta: string): Promise<LineaBanco[]> {
   const { rows } = await sql<LineaBanco & { linea_id: string; monto: string }>`
-    SELECT linea_id, asiento_id, numero, to_char(fecha, 'YYYY-MM-DD') AS fecha, tipo, glosa, monto, tercero, anulada, conciliacion_id
+    SELECT linea_id, asiento_id, numero, to_char(fecha, 'YYYY-MM-DD') AS fecha, tipo, glosa, monto, tercero, anulada, conciliacion_id,
+           to_char(reversado_el, 'YYYY-MM-DD') AS reversado_el, to_char(reversa_de_fecha, 'YYYY-MM-DD') AS reversa_de_fecha, arrastre
     FROM tesoreria_lineas_banco(${empresaId}::uuid, ${cuentaId}::uuid, ${hasta}::date)`.execute(trx);
   return rows.map((r) => ({ ...r, linea_id: Number(r.linea_id), monto: n(r.monto) }));
 }
@@ -260,8 +267,12 @@ export async function sugerirConciliacion(trx: Trx, empresaId: string, cuentaId:
   const usadas = new Set<number>();
   const sugerencias: Array<Sugerencia & { evidencia: EvidenciaDocumento[] }> = [];
 
+  const documentos = await documentosRcv(trx, empresaId, [...new Set(movimientos.map((m) => m.rut_contraparte).filter((r) => r !== null))]);
   for (const m of movimientos) {
-    const evidencia = m.rut_contraparte ? await documentosRcv(trx, empresaId, m.rut_contraparte, Math.abs(m.monto), m.monto > 0) : [];
+    const evidencia = (documentos.get(m.rut_contraparte ?? '') ?? [])
+      .filter((d) => d.libro === (m.monto > 0 ? 'VENTA' : 'COMPRA') && d.monto_total === Math.abs(m.monto))
+      .slice(0, 5)
+      .map(({ rut: _rut, ...d }) => d);
     const candidatas = lineas
       .filter((l) => !usadas.has(l.linea_id) && l.monto === m.monto && dias(l.fecha, m.fecha) <= DIAS_TOLERANCIA)
       .sort((a, b) => dias(a.fecha, m.fecha) - dias(b.fecha, m.fecha));
@@ -314,20 +325,33 @@ function addDias(fecha: string, d: number): string {
   return new Date(Date.parse(fecha) + d * 86_400_000).toISOString().slice(0, 10);
 }
 
-async function documentosRcv(trx: Trx, empresaId: string, rut: string, monto: number, venta: boolean): Promise<EvidenciaDocumento[]> {
-  const { rows } = await sql<EvidenciaDocumento & { monto_total: string }>`
-    SELECT i.libro, d.tipo_documento, d.folio, to_char(d.fecha_documento, 'YYYY-MM-DD') AS fecha, d.monto_total
+/** Documentos del RCV vigente de las contrapartes indicadas (una sola consulta). */
+async function documentosRcv(trx: Trx, empresaId: string, ruts: string[]): Promise<Map<string, Array<EvidenciaDocumento & { rut: string }>>> {
+  const mapa = new Map<string, Array<EvidenciaDocumento & { rut: string }>>();
+  if (ruts.length === 0) return mapa;
+  const { rows } = await sql<EvidenciaDocumento & { rut: string; monto_total: string; folio: string }>`
+    SELECT d.rut_contraparte AS rut, i.libro, d.tipo_documento, d.folio, to_char(d.fecha_documento, 'YYYY-MM-DD') AS fecha, d.monto_total
     FROM rcv_documentos d JOIN rcv_importaciones i ON i.id = d.importacion_id
     WHERE d.empresa_id = ${empresaId}::uuid AND i.estado = 'VIGENTE' AND i.seccion = 'REGISTRO'
-      AND i.libro = ${venta ? 'VENTA' : 'COMPRA'} AND d.rut_contraparte = ${rut} AND d.monto_total = ${monto}
-      AND d.tipo_documento NOT IN (60, 61, 112)
-    ORDER BY d.fecha_documento DESC LIMIT 5`.execute(trx);
-  return rows.map((r) => ({ ...r, folio: Number(r.folio), monto_total: n(r.monto_total) }));
+      AND d.rut_contraparte = ANY (${ruts}::text[]) AND d.tipo_documento NOT IN (60, 61, 112)
+    ORDER BY d.fecha_documento DESC`.execute(trx);
+  for (const r of rows) {
+    const d = { ...r, folio: Number(r.folio), monto_total: n(r.monto_total) };
+    mapa.set(r.rut, [...(mapa.get(r.rut) ?? []), d]);
+  }
+  return mapa;
 }
 
 // ---------------------------------------------------------------------------
 // Informe de conciliación
 // ---------------------------------------------------------------------------
+const MAX_FECHA = '2999-12-31';
+
+/**
+ * Conciliación a una fecha de corte. Todo se evalúa "al corte": una partida conciliada
+ * cuya contraparte tiene fecha posterior al corte sigue en tránsito (depósito no
+ * acreditado, cheque no cobrado), y un asiento reversado después del corte sigue vigente.
+ */
 export async function informeConciliacion(trx: Trx, empresaId: string, cuentaId: string, corte: string) {
   await exigirPermiso(trx, empresaId, 'tesoreria.saldos.ver');
   const cuenta = await cuentaBancaria(trx, empresaId, cuentaId);
@@ -337,6 +361,11 @@ export async function informeConciliacion(trx: Trx, empresaId: string, cuentaId:
   if (cartolas.length === 0) throw new ErrorNegocio('SIN_CARTOLAS', 'La cuenta no tiene cartolas importadas.', 422);
   const inicio = cartolas[0]!.desde;
   if (corte < inicio) throw new ErrorNegocio('FECHA_INVALIDA', `La conciliación empieza el ${inicio}, con la primera cartola.`, 422);
+  const saldoInicialBanco = n(cartolas[0]!.saldo_anterior);
+
+  const todosMov = await listarMovimientos(trx, empresaId, cuentaId);
+  const todasLineas = await lineasBanco(trx, empresaId, cuentaId, MAX_FECHA);
+  const saldoBancoAl = (fecha: string) => saldoInicialBanco + todosMov.filter((m) => m.fecha <= fecha).reduce((s2, m) => s2 + m.monto, 0);
 
   const advertencias: string[] = [];
   let cubierto = cartolas[0]!.hasta;
@@ -344,32 +373,61 @@ export async function informeConciliacion(trx: Trx, empresaId: string, cuentaId:
     if (addDias(cubierto, 1) < c.desde) advertencias.push(`Faltan cartolas entre el ${cubierto} y el ${c.desde}: el saldo del banco no es confiable.`);
     if (c.hasta > cubierto) cubierto = c.hasta;
   }
+  for (const c of cartolas) {
+    if (saldoBancoAl(c.hasta) !== n(c.saldo_final)) {
+      advertencias.push(`Los movimientos guardados no reproducen el saldo final de la cartola al ${c.hasta} ($${c.saldo_final}).`);
+    }
+  }
   if (cubierto < corte) advertencias.push(`Las cartolas llegan hasta el ${cubierto}: los movimientos posteriores no están importados.`);
 
-  const movimientos = await listarMovimientos(trx, empresaId, cuentaId, { hasta: corte });
-  const saldoBanco = n(cartolas[0]!.saldo_anterior) + movimientos.reduce((s, m) => s + m.monto, 0);
+  // Fecha más tardía de cada lado de cada conciliación.
+  const ultimaLinea = new Map<string, string>();
+  for (const l of todasLineas) {
+    if (l.conciliacion_id && (ultimaLinea.get(l.conciliacion_id) ?? '') < l.fecha) ultimaLinea.set(l.conciliacion_id, l.fecha);
+  }
+  const ultimoMov = new Map<string, string>();
+  for (const m of todosMov) {
+    if (m.conciliacion_id && (ultimoMov.get(m.conciliacion_id) ?? '') < m.fecha) ultimoMov.set(m.conciliacion_id, m.fecha);
+  }
 
-  const { rows: ej } = await sql<{ fecha_inicio: string }>`
-    SELECT to_char(fecha_inicio, 'YYYY-MM-DD') AS fecha_inicio FROM ejercicios_contables
-    WHERE empresa_id = ${empresaId}::uuid AND ${corte}::date BETWEEN fecha_inicio AND fecha_termino`.execute(trx);
-  if (!ej[0]) throw new ErrorNegocio('SIN_EJERCICIO', 'No hay un ejercicio contable para la fecha de corte.', 422);
-  const lineas = await lineasBanco(trx, empresaId, cuentaId, corte);
-  // Saldo en libros: movimientos del ejercicio de la fecha de corte (incluye su apertura).
-  const saldoLibros = lineas.filter((l) => l.fecha >= ej[0]!.fecha_inicio).reduce((s, l) => s + l.monto, 0);
+  const movimientos = todosMov.filter((m) => m.fecha <= corte);
+  const saldoBanco = saldoBancoAl(corte);
+  const pendientesBanco = movimientos.filter((m) => !m.conciliacion_id || (ultimaLinea.get(m.conciliacion_id) ?? MAX_FECHA) > corte);
 
-  const pendientesBanco = movimientos.filter((m) => !m.conciliacion_id);
-  const pendientesLibros = lineas.filter(
-    (l) => !l.conciliacion_id && !l.anulada && l.tipo !== 'APERTURA' && l.tipo !== 'CIERRE' && l.fecha >= inicio,
-  );
-  const conAsientoReversado = lineas.filter((l) => l.anulada && l.conciliacion_id);
+  // Saldo contable: todas las líneas hasta el corte, sin las aperturas y cierres que genera el
+  // sistema (repiten saldos de otro ejercicio). Así no depende de que el año anterior esté cerrado.
+  const lineas = todasLineas.filter((l) => l.fecha <= corte && !l.arrastre);
+  const saldoLibros = lineas.reduce((s2, l) => s2 + l.monto, 0);
+  const anuladaAlCorte = (l: LineaBanco) =>
+    (l.reversado_el !== null && l.reversado_el <= corte) || (l.tipo === 'REVERSA' && l.reversa_de_fecha !== null && l.reversa_de_fecha <= corte);
+  const enTransito = (l: LineaBanco) =>
+    !anuladaAlCorte(l) && l.tipo !== 'APERTURA' && l.tipo !== 'CIERRE' &&
+    (!l.conciliacion_id || (ultimoMov.get(l.conciliacion_id) ?? MAX_FECHA) > corte);
+  const pendientesLibros = lineas.filter((l) => l.fecha >= inicio && enTransito(l));
+
+  // Diferencia al inicio: partidas contables anteriores a la primera cartola que aún no
+  // habían pasado por el banco (cheques girados, depósitos en tránsito) o errores.
+  const saldoLibrosInicio = todasLineas.filter((l) => l.fecha < inicio && !l.arrastre).reduce((s2, l) => s2 + l.monto, 0);
+  const diferenciaInicial = saldoLibrosInicio - saldoInicialBanco;
+  const aclaradasDespues = todasLineas
+    .filter((l) => l.fecha < inicio && !l.arrastre && l.conciliacion_id && (ultimoMov.get(l.conciliacion_id) ?? MAX_FECHA) <= corte)
+    .reduce((s2, l) => s2 + l.monto, 0);
+  const inicialPendiente = diferenciaInicial - aclaradasDespues;
+  if (inicialPendiente !== 0) {
+    advertencias.push(
+      `Al ${inicio} la contabilidad y el banco diferían en $${diferenciaInicial}; quedan $${inicialPendiente} sin aclarar. Si no son cheques o depósitos en tránsito anteriores al inicio, revise el saldo inicial.`,
+    );
+  }
+
+  const conAsientoReversado = lineas.filter((l) => anuladaAlCorte(l) && l.conciliacion_id);
   if (conAsientoReversado.length > 0) {
     advertencias.push(
       `${conAsientoReversado.length} conciliación(es) tienen un asiento que después se reversó: anúlelas y vuelva a conciliar.`,
     );
   }
-  const sumaBanco = pendientesBanco.reduce((s, m) => s + m.monto, 0);
-  const sumaLibros = pendientesLibros.reduce((s, l) => s + l.monto, 0);
-  const saldoConciliado = saldoLibros + sumaBanco - sumaLibros;
+  const sumaBanco = pendientesBanco.reduce((s2, m) => s2 + m.monto, 0);
+  const sumaLibros = pendientesLibros.reduce((s2, l) => s2 + l.monto, 0);
+  const saldoConciliado = saldoLibros + sumaBanco - sumaLibros - inicialPendiente;
   return {
     cuenta: { id: cuenta.id, banco: cuenta.banco, numero: cuenta.numero, cuentaContable: cuenta.cuenta_contable },
     corte,
@@ -378,6 +436,7 @@ export async function informeConciliacion(trx: Trx, empresaId: string, cuentaId:
     saldoLibros,
     movimientosNoContabilizados: pendientesBanco,
     partidasNoCobradasEnBanco: pendientesLibros,
+    diferenciaInicialPendiente: inicialPendiente,
     saldoConciliado,
     diferencia: saldoBanco - saldoConciliado,
     cuadra: saldoBanco === saldoConciliado && advertencias.length === 0,

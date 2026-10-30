@@ -119,7 +119,10 @@ CREATE TABLE movimientos_bancarios (
   -- cartolas traslapadas no dupliquen movimientos y que dos transferencias iguales el
   -- mismo día se distingan.
   ocurrencia         int NOT NULL CHECK (ocurrencia > 0),
-  UNIQUE (cuenta_id, fecha, descripcion, monto, ocurrencia)
+  -- Descripción sin diferencias de mayúsculas ni espacios, para reconocer el mismo
+  -- movimiento en dos cartolas.
+  descripcion_clave  text GENERATED ALWAYS AS (lower(regexp_replace(trim(descripcion), '\s+', ' ', 'g'))) STORED,
+  UNIQUE (cuenta_id, fecha, descripcion_clave, monto, ocurrencia)
 );
 CREATE INDEX movimientos_bancarios_fecha_idx ON movimientos_bancarios (cuenta_id, fecha);
 
@@ -237,7 +240,8 @@ BEGIN
     v_final, p_formato, left(trim(p_archivo_nombre), 200), p_archivo_sha256, v_n, v_usuario);
 
   WITH entrada AS (
-    SELECT m.*, row_number() OVER (PARTITION BY m.fecha, trim(m.descripcion), m.monto ORDER BY o) AS ocurrencia
+    SELECT m.*, row_number() OVER (PARTITION BY m.fecha, lower(regexp_replace(trim(m.descripcion), '\s+', ' ', 'g')), m.monto
+                                   ORDER BY o) AS ocurrencia
     FROM ROWS FROM (jsonb_to_recordset(p_movimientos) AS (fecha date, descripcion text, numero_documento text,
       monto numeric, saldo numeric, rut_contraparte text))
       WITH ORDINALITY AS m(fecha, descripcion, numero_documento, monto, saldo, rut_contraparte, o)
@@ -247,10 +251,20 @@ BEGIN
     SELECT p_empresa, p_cuenta, v_id, e.fecha, trim(e.descripcion), nullif(left(trim(coalesce(e.numero_documento, '')), 50), ''),
       e.monto, e.saldo, e.rut_contraparte, e.ocurrencia
     FROM entrada e ORDER BY e.o
-    ON CONFLICT (cuenta_id, fecha, descripcion, monto, ocurrencia) DO NOTHING
+    ON CONFLICT (cuenta_id, fecha, descripcion_clave, monto, ocurrencia) DO NOTHING
     RETURNING 1
   )
   SELECT count(*) INTO v_nuevos FROM insertados;
+
+  -- Los movimientos guardados del período deben ser exactamente los de esta cartola: si
+  -- otra cartola trajo movimientos distintos para los mismos días, no calzan.
+  IF (SELECT coalesce(sum(monto), 0) FROM movimientos_bancarios
+      WHERE cuenta_id = p_cuenta AND fecha BETWEEN v_desde AND v_hasta) <> v_final - v_anterior
+     OR (SELECT count(*) FROM movimientos_bancarios
+         WHERE cuenta_id = p_cuenta AND fecha BETWEEN v_desde AND v_hasta) <> v_n THEN
+    RAISE EXCEPTION 'La cartola no calza con los movimientos ya importados de % a %: revise si hay una cartola parcial o alterada',
+      to_char(v_desde, 'DD-MM-YYYY'), to_char(v_hasta, 'DD-MM-YYYY') USING ERRCODE = 'check_violation';
+  END IF;
 
   PERFORM contabilidad_auditar('CARTOLA_IMPORTADA', 'cartolas', v_id::text,
     jsonb_build_object('cuenta', p_cuenta, 'desde', v_desde, 'hasta', v_hasta, 'movimientos', v_n, 'nuevos', v_nuevos,
@@ -384,6 +398,9 @@ BEGIN
     RAISE EXCEPTION 'Alguna línea contable ya está conciliada' USING ERRCODE = 'check_violation';
   END IF;
   SELECT sum(l.debe - l.haber) INTO v_suma_lin FROM asiento_lineas l WHERE l.id = ANY (p_lineas);
+  IF v_suma_mov = 0 THEN
+    RAISE EXCEPTION 'No se concilian grupos de neto cero: concilie cada partida con su contraparte' USING ERRCODE = 'check_violation';
+  END IF;
   IF v_suma_mov <> v_suma_lin THEN
     RAISE EXCEPTION 'No cuadra: los movimientos del banco suman $% y las líneas contables $%', v_suma_mov, v_suma_lin
       USING ERRCODE = 'check_violation';
@@ -392,7 +409,8 @@ BEGIN
   IF tributario_es_agente() THEN
     v_origen := 'AGENTE';
   ELSIF v_propuesta IS NOT NULL AND EXISTS (SELECT 1 FROM propuestas_agente WHERE id::text = v_propuesta
-        AND empresa_id = p_empresa AND estado = 'PENDIENTE') THEN
+        AND empresa_id = p_empresa AND estado = 'PENDIENTE'
+        AND herramienta IN ('proponer_conciliar', 'proponer_contabilizar_movimiento')) THEN
     v_origen := 'AGENTE_APROBADO';
   ELSE
     v_origen := 'MANUAL';
@@ -421,6 +439,9 @@ BEGIN
     RAISE EXCEPTION 'Conciliación no encontrada' USING ERRCODE = 'insufficient_privilege';
   END IF;
   PERFORM tesoreria_exigir(v.empresa_id, 'tesoreria.conciliar');
+  IF tributario_es_agente() THEN
+    RAISE EXCEPTION 'Una conciliación la anula una persona' USING ERRCODE = 'insufficient_privilege';
+  END IF;
   IF v.estado <> 'VIGENTE' THEN
     RAISE EXCEPTION 'La conciliación ya está anulada' USING ERRCODE = 'check_violation';
   END IF;
@@ -440,7 +461,8 @@ $$;
 -- el permiso de ver todo el libro: muestra solo la cuenta del banco.
 CREATE FUNCTION tesoreria_lineas_banco(p_empresa uuid, p_cuenta uuid, p_hasta date)
 RETURNS TABLE (linea_id bigint, asiento_id uuid, numero int, fecha date, tipo text, glosa text, monto numeric,
-               tercero text, anulada boolean, conciliacion_id uuid)
+               tercero text, anulada boolean, conciliacion_id uuid,
+               reversado_el date, reversa_de_fecha date, arrastre boolean)
 LANGUAGE plpgsql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
 #variable_conflict use_column
 DECLARE
@@ -453,9 +475,15 @@ BEGIN
   END IF;
   RETURN QUERY
   SELECT l.id, a.id, a.numero, a.fecha, a.tipo, coalesce(l.glosa, a.glosa), l.debe - l.haber,
-         t.rut, tesoreria_linea_anulada(a.id), cl.conciliacion_id
+         t.rut, tesoreria_linea_anulada(a.id), cl.conciliacion_id,
+         (SELECT r.fecha FROM asientos r WHERE r.reversa_de = a.id),
+         o.fecha,
+         -- Apertura o cierre generados por el sistema (y sus reversas): repiten saldos de
+         -- otro ejercicio, no son movimientos.
+         (a.origen = 'MODULO' AND (a.tipo IN ('APERTURA', 'CIERRE') OR o.tipo IN ('APERTURA', 'CIERRE')))
   FROM asiento_lineas l
   JOIN asientos a ON a.id = l.asiento_id
+  LEFT JOIN asientos o ON o.id = a.reversa_de
   LEFT JOIN terceros t ON t.id = l.tercero_id
   LEFT JOIN conciliacion_lineas cl ON cl.asiento_linea_id = l.id AND cl.vigente
   WHERE l.empresa_id = p_empresa AND l.cuenta_id = v_cuenta_contable AND a.fecha <= p_hasta
@@ -530,8 +558,29 @@ BEGIN
     RAISE EXCEPTION 'Regla no encontrada' USING ERRCODE = 'insufficient_privilege';
   END IF;
   PERFORM tesoreria_exigir(v.empresa_id, 'tesoreria.cuentas.administrar');
+  IF tributario_es_agente() THEN
+    RAISE EXCEPTION 'Las reglas las administra una persona' USING ERRCODE = 'insufficient_privilege';
+  END IF;
   UPDATE reglas_conciliacion SET activa = false WHERE id = p_id;
   PERFORM contabilidad_auditar('REGLA_CONCILIACION_DESACTIVADA', 'reglas_conciliacion', p_id::text, '{}'::jsonb, v.empresa_id);
+END;
+$$;
+
+CREATE FUNCTION tesoreria_desactivar_cuenta(p_id uuid) RETURNS void
+LANGUAGE plpgsql SECURITY DEFINER SET search_path = public, pg_temp AS $$
+DECLARE
+  v cuentas_bancarias;
+BEGIN
+  SELECT * INTO v FROM cuentas_bancarias WHERE id = p_id FOR UPDATE;
+  IF v.id IS NULL OR v.empresa_id IS DISTINCT FROM app_empresa_id() THEN
+    RAISE EXCEPTION 'Cuenta bancaria no encontrada' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  PERFORM tesoreria_exigir(v.empresa_id, 'tesoreria.cuentas.administrar');
+  IF tributario_es_agente() THEN
+    RAISE EXCEPTION 'Las cuentas bancarias las administra una persona' USING ERRCODE = 'insufficient_privilege';
+  END IF;
+  UPDATE cuentas_bancarias SET activa = false WHERE id = p_id;
+  PERFORM contabilidad_auditar('CUENTA_BANCARIA_DESACTIVADA', 'cuentas_bancarias', p_id::text, '{}'::jsonb, v.empresa_id);
 END;
 $$;
 
@@ -572,5 +621,6 @@ GRANT EXECUTE ON FUNCTION
   tesoreria_anular_conciliacion(uuid, text),
   tesoreria_lineas_banco(uuid, uuid, date),
   tesoreria_crear_regla(uuid, uuid, text, text, text, text, text, text, text),
-  tesoreria_desactivar_regla(uuid)
+  tesoreria_desactivar_regla(uuid),
+  tesoreria_desactivar_cuenta(uuid)
 TO erp_app;

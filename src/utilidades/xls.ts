@@ -14,7 +14,9 @@ export type Celda = string | number | boolean | null;
 
 const MAX_BYTES = 10 * 1024 * 1024;
 const MAX_FILAS = 100_000;
-const MAX_COLUMNAS = 256;
+const MAX_COLUMNAS = 64;
+/** Celdas reservadas en total (incluye las vacías intermedias): acota la memoria. */
+const MAX_CELDAS = 1_000_000;
 
 export class ErrorXls extends Error {}
 
@@ -180,11 +182,18 @@ export function leerXls(contenido: Buffer): Celda[][] {
   const textos = sst.length > 0 ? leerSst(sst) : [];
 
   const filas: Celda[][] = [];
+  let celdas = 0;
   const poner = (fila: number, col: number, valor: Celda) => {
     if (fila >= MAX_FILAS || col >= MAX_COLUMNAS) throw new ErrorXls('La hoja excede el tamaño permitido');
-    while (filas.length <= fila) filas.push([]);
+    while (filas.length <= fila) {
+      filas.push([]);
+      if (++celdas > MAX_CELDAS) throw new ErrorXls('La hoja excede el tamaño permitido');
+    }
     const f = filas[fila]!;
-    while (f.length <= col) f.push(null);
+    while (f.length <= col) {
+      f.push(null);
+      if (++celdas > MAX_CELDAS) throw new ErrorXls('La hoja excede el tamaño permitido');
+    }
     f[col] = valor;
   };
 

@@ -47,6 +47,23 @@ Fecha: 2026-10-30
   - La conciliación queda con origen `AGENTE_APROBADO`.
   - El asiento lo registra la persona que aprueba, con origen `MANUAL`, porque el libro diario solo acepta asientos de agente desde la herramienta de asientos.
 
+## Revisión independiente (30-10-2026)
+
+El revisor (contador auditor e ingeniero de seguridad) reprodujo con pruebas propias los errores contables. Todos se corrigieron y tienen prueba:
+
+| Gravedad | Hallazgo | Corrección |
+| --- | --- | --- |
+| Alta | Una partida conciliada con otra de fecha posterior al corte (depósito en tránsito, cheque no cobrado) se daba por resuelta. | El informe evalúa todo al corte: la partida sigue pendiente mientras su contraparte tenga fecha posterior. |
+| Alta | El saldo contable perdía el saldo del año anterior si ese año no estaba cerrado. | El saldo contable suma todas las líneas hasta el corte, sin las aperturas y cierres que genera el sistema. |
+| Alta | Una cartola parcial podía perder un movimiento, y una diferencia de mayúsculas o espacios lo duplicaba, sin aviso. | Clave con la descripción normalizada. Después de importar se exige que los movimientos guardados del período sean exactamente los de la cartola. El informe compara el saldo final de cada cartola. |
+| Media | Las partidas en tránsito anteriores a la primera cartola descuadraban el informe. | Se informa la diferencia inicial entre la contabilidad y el banco, y lo que queda por aclarar. Al conciliar esas partidas con su cobro o pago, la diferencia se aclara. |
+| Media | Un asiento reversado después del corte salía de los pendientes. | Se considera reversado solo si la reversa es anterior o igual al corte. |
+| Media | Un .xls preparado podía consumir cientos de MB. | Límite de 64 columnas y de un millón de celdas reservadas; la tabla se busca en las primeras 60 filas. |
+| Media | Fechas inexistentes y archivos sobre el límite respondían error 500. | Validación de la fecha real y traducción de los errores de fecha y de tamaño. |
+| Media | Se podían conciliar grupos de neto cero. | Se rechazan. |
+| Media | Una cartola genérica sin saldo no se podía verificar. Además, un abono negativo se tomaba en valor absoluto. | Se exige el saldo final o el saldo diario, y se rechazan los abonos negativos. |
+| Baja | El origen `AGENTE_APROBADO` no se ligaba a la herramienta; anular y desactivar no excluían a los agentes; sugerencias con una consulta por movimiento; no había forma de desactivar una cuenta. | Corregidos. |
+
 ## Pendiente con el contador
 
 1. **Tratamiento de las transferencias a personas** que aparecen en la cartola de septiembre: a un socio y a otra persona. Pueden ser retiros, préstamos, remuneraciones u honorarios. Cada caso se registra en una cuenta distinta y tiene efectos tributarios distintos. Cuando se defina, se crea una regla por RUT y el sistema las propondrá solas.

@@ -113,7 +113,10 @@ describe('Lector de planillas .xls y de cartolas', () => {
     expect(leerCartola(csv('01-09-2026;Depósito;;500;1500')).cabecera).toMatchObject({ saldo_final: 1500, desde: '2026-09-01' });
     expect(() => leerCartola(csv('01-09-2026;Algo;-100;500;1400'))).toThrow(/cargo o un abono/u);
     expect(() => leerCartola(csv('01-09-2026;Depósito;;500;1500', 'USD'))).toThrow(/pesos chilenos/u);
-    expect(() => leerCartola(Buffer.from('Fecha;Descripción;Cargo;Abono\n01-09-2026;Depósito;;500\n'))).toThrow(/saldo anterior/u);
+    expect(() => leerCartola(Buffer.from('Fecha;Descripción;Cargo;Abono\n01-09-2026;Depósito;;500\n'))).toThrow(/saldo final o el saldo diario/u);
+    expect(() => leerCartola(csv('01-09-2026;Reversa;;-500;500'))).toThrow(/abono negativo/u);
+    // Una planilla más ancha que una cartola se rechaza antes de reservar memoria.
+    expect(() => leerXls(readFileSync(new URL('./datos/planilla_ancha.xls', import.meta.url)))).toThrow(/excede/u);
   });
 
   it('reconoce el RUT en la descripción solo si es válido', () => {
@@ -350,5 +353,124 @@ describe('Conciliación', () => {
     );
     const r = await comoContador((trx) => importarCartola(trx, { empresaId: e.empresaA1, cuentaId: cuenta, archivoNombre: 'oct.csv', contenido: csv }));
     expect(r.advertencias).toEqual([expect.objectContaining({ tipo: 'CARTOLAS_DISCONTINUAS' })]);
+  });
+});
+
+describe('Revisión independiente: conciliación al corte, años sin cerrar y cartolas que no calzan', () => {
+  let bci: string;
+  let cuentaAnio: string;
+  const importar = (cuentaId: string, lineas: string[], nombre: string) =>
+    comoContador((trx) => importarCartola(trx, { empresaId: e.empresaA1, cuentaId, archivoNombre: nombre, contenido: Buffer.from(lineas.join('\n')) }));
+  const asiento = (fecha: string, monto: number, cuenta: string, glosa: string) =>
+    comoContador((trx) =>
+      registrarAsiento(trx, {
+        empresaId: e.empresaA1,
+        fecha,
+        glosa,
+        lineas:
+          monto > 0
+            ? [{ cuenta, debe: monto }, { cuenta: '3.1.01', haber: monto }]
+            : [{ cuenta: '3.1.01', debe: -monto }, { cuenta, haber: -monto }],
+      }),
+    );
+
+  beforeAll(async () => {
+    for (const codigo of ['1.1.04', '1.1.05']) {
+      await e.owner.query(
+        `INSERT INTO plan_cuentas (empresa_id, codigo, nombre, clasificacion, naturaleza, imputable, padre_id)
+         VALUES ($1, $2, 'Banco de prueba', 'ACTIVO', 'DEUDORA', true, (SELECT id FROM plan_cuentas WHERE empresa_id = $1 AND codigo = '1.1'))`,
+        [e.empresaA1, codigo],
+      );
+    }
+    bci = await comoContador((trx) => crearCuentaBancaria(trx, { empresaId: e.empresaA1, banco: 'BCI', numero: '55554444', cuentaContable: '1.1.04' }));
+    cuentaAnio = await comoContador((trx) =>
+      crearCuentaBancaria(trx, { empresaId: e.empresaA1, banco: 'SANTANDER', numero: '33332222', cuentaContable: '1.1.05' }),
+    );
+  });
+
+  it('un depósito en tránsito y un cheque anterior al inicio se informan al corte', async () => {
+    await asiento('2026-07-01', 5_000, '1.1.04', 'Saldo inicial BCI');
+    await asiento('2026-07-25', -300, '1.1.04', 'Cheque girado en julio');
+    await importar(
+      bci,
+      ['Numero Cuenta;55554444', 'Fecha Desde;01-08-2026', 'Fecha Hasta;31-08-2026', 'Saldo Anterior;5000',
+       'Fecha;Descripción;Cargo;Abono;Saldo Diario', '10-08-2026;CHEQUE 15;-300;;4700', '31-08-2026;DEPOSITO;;1000;5700'],
+      'bci-ago.csv',
+    );
+    // El depósito se contabiliza el 02-09 (después del corte) y se concilia.
+    await asiento('2026-09-02', 1_000, '1.1.04', 'Depósito del 31-08');
+    const lineas = await comoContador((trx) => lineasBanco(trx, e.empresaA1, bci, '2026-09-30'));
+    const movs = await comoContador((trx) => listarMovimientos(trx, e.empresaA1, bci));
+    await comoContador((trx) =>
+      conciliar(trx, e.empresaA1, [movs.find((m) => m.monto === 1_000)!.id], [lineas.find((l) => l.fecha === '2026-09-02')!.linea_id]),
+    );
+
+    let i = await comoContador((trx) => informeConciliacion(trx, e.empresaA1, bci, '2026-08-31'));
+    expect(i).toMatchObject({ saldoBanco: 5_700, saldoLibros: 4_700, diferenciaInicialPendiente: -300, diferencia: 0, cuadra: false });
+    expect(i.movimientosNoContabilizados.map((m) => m.monto).sort()).toEqual([-300, 1_000]);
+    expect(i.advertencias.join(' ')).toMatch(/diferían en \$-300/u);
+
+    // Se concilia el cheque de julio con su cobro de agosto: la diferencia inicial queda aclarada.
+    await comoContador((trx) =>
+      conciliar(trx, e.empresaA1, [movs.find((m) => m.monto === -300)!.id], [lineas.find((l) => l.fecha === '2026-07-25')!.linea_id]),
+    );
+    i = await comoContador((trx) => informeConciliacion(trx, e.empresaA1, bci, '2026-08-31'));
+    expect(i).toMatchObject({ diferenciaInicialPendiente: 0, diferencia: 0, cuadra: true });
+    expect(i.movimientosNoContabilizados.map((m) => m.monto)).toEqual([1_000]);
+  });
+
+  it('un asiento reversado después del corte sigue vigente al corte', async () => {
+    const cheque = await asiento('2026-08-20', -700, '1.1.04', 'Cheque anulado después');
+    await comoContador((trx) => reversarAsiento(trx, cheque.id, '2026-09-05', 'Cheque anulado en septiembre'));
+    const i = await comoContador((trx) => informeConciliacion(trx, e.empresaA1, bci, '2026-08-31'));
+    expect(i.partidasNoCobradasEnBanco.map((l) => l.monto)).toEqual([-700]);
+    expect(i.diferencia).toBe(0);
+  });
+
+  it('el saldo contable incluye el año anterior aunque no esté cerrado', async () => {
+    await comoContador((trx) => crearEjercicio(trx, e.empresaA1, 2025));
+    await asiento('2025-12-15', 5_000, '1.1.05', 'Depósito de diciembre');
+    await importar(
+      cuentaAnio,
+      ['Numero Cuenta;33332222', 'Fecha Desde;01-01-2026', 'Fecha Hasta;31-01-2026', 'Saldo Anterior;5000', 'Saldo Actual;5000',
+       'Fecha;Descripción;Cargo;Abono;Saldo Diario'],
+      'santander-ene.csv',
+    );
+    const i = await comoContador((trx) => informeConciliacion(trx, e.empresaA1, cuentaAnio, '2026-01-31'));
+    expect(i).toMatchObject({ saldoBanco: 5_000, saldoLibros: 5_000, diferencia: 0, cuadra: true });
+  });
+
+  it('una cartola que contradice los movimientos ya importados se rechaza; mayúsculas y espacios no duplican', async () => {
+    // Igual a la de agosto, pero con distinta mayúscula y espacios: no agrega nada.
+    const r = await importar(
+      bci,
+      ['Numero Cuenta;55554444', 'Fecha Desde;10-08-2026', 'Fecha Hasta;31-08-2026', 'Saldo Anterior;5000',
+       'Fecha;Descripción;Cargo;Abono;Saldo Diario', '10-08-2026;cheque  15;-300;;4700', '31-08-2026;Deposito;;1000;5700'],
+      'bci-ago-2.csv',
+    );
+    expect(r.nuevos).toBe(0);
+    // Una cartola parcial que trae otro movimiento para días ya cubiertos no calza.
+    await expect(
+      importar(
+        bci,
+        ['Numero Cuenta;55554444', 'Fecha Desde;31-08-2026', 'Fecha Hasta;31-08-2026', 'Saldo Anterior;4700',
+         'Fecha;Descripción;Cargo;Abono;Saldo Diario', '31-08-2026;COMISION;-100;;4600'],
+        'bci-parcial.csv',
+      ),
+    ).rejects.toThrow(/no calza/u);
+  });
+
+  it('no se concilian grupos de neto cero', async () => {
+    await importar(
+      bci,
+      ['Numero Cuenta;55554444', 'Fecha Desde;01-09-2026', 'Fecha Hasta;03-09-2026', 'Saldo Anterior;5700',
+       'Fecha;Descripción;Cargo;Abono;Saldo Diario', '01-09-2026;ABONO X;;100;5800', '03-09-2026;CARGO Y;-100;;5700'],
+      'bci-sep.csv',
+    );
+    const movs = (await comoContador((trx) => listarMovimientos(trx, e.empresaA1, bci, { soloPendientes: true }))).filter((m) => m.fecha >= '2026-09-01');
+    const a = await asiento('2026-09-01', 777, '1.1.04', 'Partida A');
+    const b = await asiento('2026-09-02', -777, '1.1.04', 'Partida B');
+    const lineas = (await comoContador((trx) => lineasBanco(trx, e.empresaA1, bci, '2026-09-30'))).filter((l) => [a.id, b.id].includes(l.asiento_id));
+    await expect(comoContador((trx) => conciliar(trx, e.empresaA1, movs.map((m) => m.id), lineas.map((l) => l.linea_id)))).rejects.toThrow(/neto cero/u);
   });
 });

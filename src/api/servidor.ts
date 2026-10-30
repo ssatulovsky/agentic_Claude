@@ -118,7 +118,9 @@ export async function crearServidor(deps: Dependencias): Promise<FastifyInstance
             ? new ErrorNegocio('DEMASIADAS_PETICIONES', 'Demasiadas peticiones. Espere un momento.', 429)
             : (error as { validation?: unknown }).validation
               ? new ErrorNegocio('DATOS_INVALIDOS', (error as Error).message, 400)
-              : (error as { statusCode?: number }).statusCode === 415
+              : (error as { statusCode?: number }).statusCode === 413
+                ? new ErrorNegocio('ARCHIVO_DEMASIADO_GRANDE', 'El archivo o los datos enviados exceden el tamaño permitido.', 413)
+                : (error as { statusCode?: number }).statusCode === 415
                 ? new ErrorNegocio('TIPO_CONTENIDO', 'Tipo de contenido no soportado.', 415)
                 : null));
     if (negocio) {
