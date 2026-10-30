@@ -5,8 +5,9 @@ import { Ingreso } from './paginas/Ingreso';
 import { Parametrizacion } from './paginas/Parametrizacion';
 import { ReglasConciliacion } from './paginas/ReglasConciliacion';
 import { UsoIa } from './paginas/UsoIa';
+import { WhatsApp } from './paginas/WhatsApp';
 
-type Pagina = 'asistentes' | 'parametrizacion' | 'reglas' | 'ia';
+type Pagina = 'asistentes' | 'parametrizacion' | 'reglas' | 'ia' | 'whatsapp';
 
 export function App() {
   const [yo, setYo] = useState<Yo | null>(null);
@@ -79,6 +80,9 @@ export function App() {
           <button className={pagina === 'ia' ? 'activo' : ''} onClick={() => setPagina('ia')}>
             IA
           </button>
+          <button className={pagina === 'whatsapp' ? 'activo' : ''} onClick={() => setPagina('whatsapp')}>
+            WhatsApp
+          </button>
         </nav>
         <div className="sesion">
           <select
@@ -106,7 +110,9 @@ export function App() {
         </div>
       </header>
       <main>
-        {!empresa ? (
+        {pagina === 'whatsapp' ? (
+          <WhatsApp />
+        ) : !empresa ? (
           <p>No tiene empresas asignadas.</p>
         ) : pagina === 'asistentes' ? (
           <Asistentes key={empresa.id} empresa={empresa} />

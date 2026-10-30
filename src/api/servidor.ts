@@ -16,6 +16,10 @@ import { rutasAutenticacion } from './rutas/autenticacion.js';
 import { rutasContabilidad } from './rutas/contabilidad.js';
 import { fabricaDesdeConfiguracion, type FabricaModelos } from '../ia/enrutador.js';
 import { rutasIa } from './rutas/ia.js';
+import { rutasWhatsapp } from './rutas/whatsapp.js';
+import { PuenteHttp, type CanalMensajeria } from '../canales/whatsapp/puente.js';
+import { ServicioWhatsapp } from '../canales/whatsapp/servicio.js';
+import { TranscriptorCompatible, type Transcriptor } from '../canales/whatsapp/transcripcion.js';
 import { rutasParametrizacion } from './rutas/parametrizacion.js';
 import { rutasTesoreria } from './rutas/tesoreria.js';
 import { rutasTributario } from './rutas/tributario.js';
@@ -25,6 +29,9 @@ import { rutasNormativaYBitacora } from './rutas/normativa.js';
 declare module 'fastify' {
   interface FastifyRequest {
     sesion?: SesionResuelta;
+  }
+  interface FastifyInstance {
+    canalWhatsapp: ServicioWhatsapp | null;
   }
 }
 
@@ -37,6 +44,12 @@ export interface Dependencias {
   registro: RegistroAgentes;
   /** Clientes de los modelos de IA; por defecto, según las claves y URL de la configuración. */
   fabricaModelos?: FabricaModelos;
+  /** Conexión del rol de autenticación: identifica por teléfono a quien escribe por WhatsApp. */
+  dbAuth?: Db;
+  /** Envío de mensajes de WhatsApp; por defecto, el puente HTTP de la configuración. */
+  canalWhatsapp?: CanalMensajeria;
+  /** Transcripción de notas de voz; por defecto, el servicio de la configuración (o ninguno). */
+  transcriptor?: Transcriptor | null;
 }
 
 /** Valida un cuerpo, parámetros o consulta con zod y devuelve un error 422 legible si no cumple. */
@@ -187,6 +200,35 @@ export async function crearServidor(depsEntrada: Dependencias): Promise<FastifyI
   await app.register(async (r) => rutasTesoreria(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasParametrizacion(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasIa(r, deps), { prefix: '/api' });
+
+  // Canal WhatsApp: activo solo con secreto del puente, conexión de autenticación y forma de enviar.
+  const c = deps.config;
+  const salida = deps.canalWhatsapp ?? (c.WHATSAPP_PUENTE_URL && c.WHATSAPP_PUENTE_SECRETO ? new PuenteHttp({ url: c.WHATSAPP_PUENTE_URL, secreto: c.WHATSAPP_PUENTE_SECRETO }) : null);
+  const whatsapp =
+    c.WHATSAPP_PUENTE_SECRETO && deps.dbAuth && salida
+      ? new ServicioWhatsapp({
+          db: deps.db,
+          dbAuth: deps.dbAuth,
+          registro: deps.registro,
+          fabricaModelos: deps.fabricaModelos!,
+          canal: salida,
+          transcriptor:
+            deps.transcriptor !== undefined
+              ? deps.transcriptor
+              : c.TRANSCRIPCION_URL
+                ? new TranscriptorCompatible({ url: c.TRANSCRIPCION_URL, modelo: c.TRANSCRIPCION_MODELO, ...(c.TRANSCRIPCION_API_KEY ? { apiKey: c.TRANSCRIPCION_API_KEY } : {}) })
+                : null,
+          claveMaestra: c.CLAVE_MAESTRA_CIFRADO,
+          plazoConversacionMs: c.IA_PLAZO_CONVERSACION_MS,
+          registrar: { warn: (d, m) => app.log.warn(d, m), error: (d, m) => app.log.error(d, m) },
+        })
+      : null;
+  app.decorate('canalWhatsapp', whatsapp);
+  app.addHook('onClose', async () => {
+    // Plazo acotado: lo que quede a medias, el conector lo reenvía y se reprocesa.
+    await whatsapp?.esperarPendientes(20_000);
+  });
+  await app.register(async (r) => rutasWhatsapp(r, deps, whatsapp), { prefix: '/api' });
 
   return app;
 }

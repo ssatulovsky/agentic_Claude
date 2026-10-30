@@ -10,7 +10,7 @@ async function main(): Promise<void> {
   const db = crearDb(config.DATABASE_URL);
   const dbAuth = crearDb(config.DATABASE_URL_AUTH, 5);
   const autenticacion = new ServicioAutenticacion(dbAuth, new Cifrador(config.CLAVE_MAESTRA_CIFRADO), config);
-  const app = await crearServidor({ db, config, autenticacion, registro: new RegistroAgentes() });
+  const app = await crearServidor({ db, dbAuth, config, autenticacion, registro: new RegistroAgentes() });
 
   const cerrar = async (senal: string) => {
     app.log.info(`Recibida ${senal}; cerrando.`);
