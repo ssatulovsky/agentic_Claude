@@ -1,3 +1,4 @@
+import { readFileSync } from 'node:fs';
 import type { FastifyInstance, LightMyRequestResponse } from 'fastify';
 import { afterAll, beforeAll, describe, expect, inject, it } from 'vitest';
 import { RegistroAgentes } from '../src/agentes/catalogo.js';
@@ -380,6 +381,49 @@ describe('Datos por empresa a través de la API', () => {
     const f29 = await app.inject({ method: 'POST', url: `${base}/f29`, cookies: c, payload: { anio: 2026, mes: 6, remanenteAnterior: 0 } });
     expect(f29.statusCode).toBe(422);
     expect(f29.json().error.mensaje).toMatch(/Falta importar el registro de compras/u);
+  });
+
+  it('tesorería: importa una cartola .xls por la API', async () => {
+    const c = { [NOMBRE_COOKIE]: cookieContador };
+    const base = `/api/empresas/${e.empresaA1}`;
+    await e.owner.query(
+      `INSERT INTO suscripciones_modulo (empresa_id, modulo_codigo, pagador, vigente_desde) VALUES ($1, 'TESORERIA', 'EMPRESA', '2026-01-01')`,
+      [e.empresaA1],
+    );
+    const cuenta = await app.inject({
+      method: 'POST',
+      url: `${base}/cuentas-bancarias`,
+      cookies: c,
+      payload: { banco: 'SCOTIABANK', numero: '1234567890', cuentaContable: '1.1.02' },
+    });
+    expect(cuenta.statusCode).toBe(201);
+    const archivo = readFileSync(new URL('./datos/cartola_scotiabank_sep2026.xls', import.meta.url));
+    const r = await app.inject({
+      method: 'POST',
+      url: `${base}/cuentas-bancarias/${cuenta.json().id}/cartolas`,
+      cookies: c,
+      payload: { archivoNombre: 'sep.xls', contenidoBase64: archivo.toString('base64') },
+    });
+    expect(r.statusCode).toBe(201);
+    expect(r.json()).toMatchObject({ movimientos: 12, nuevos: 12 });
+    const malo = await app.inject({
+      method: 'POST',
+      url: `${base}/cuentas-bancarias/${cuenta.json().id}/cartolas`,
+      cookies: c,
+      payload: { archivoNombre: 'x.xls', contenidoBase64: Buffer.from('basura sin formato').toString('base64') },
+    });
+    expect(malo.statusCode).toBe(422);
+    const movs = await app.inject({ method: 'GET', url: `${base}/cuentas-bancarias/${cuenta.json().id}/movimientos?pendientes=si`, cookies: c });
+    expect(movs.json()).toHaveLength(12);
+    const fechaMala = await app.inject({ method: 'GET', url: `${base}/cuentas-bancarias/${cuenta.json().id}/movimientos?hasta=2026-02-30`, cookies: c });
+    expect(fechaMala.statusCode).toBe(422);
+    const grande = await app.inject({
+      method: 'POST',
+      url: `${base}/cuentas-bancarias/${cuenta.json().id}/cartolas`,
+      cookies: c,
+      payload: { archivoNombre: 'x.xls', contenidoBase64: 'A'.repeat(15 * 1024 * 1024) },
+    });
+    expect(grande.statusCode).toBe(413);
   });
 
   it('la cadena de la bitácora sigue íntegra después de todo lo anterior', async () => {

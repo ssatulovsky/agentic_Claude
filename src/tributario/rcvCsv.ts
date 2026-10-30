@@ -210,7 +210,7 @@ export function normalizarTexto(texto: string): string {
     .trim();
 }
 
-function detectarSeparador(linea: string): string {
+export function detectarSeparador(linea: string): string {
   const conteo = (c: string) => linea.split(c).length - 1;
   const candidatos = [';', ',', '\t'].map((c) => [c, conteo(c)] as const).sort((a, b) => b[1] - a[1]);
   const mejor = candidatos[0]!;
@@ -219,7 +219,7 @@ function detectarSeparador(linea: string): string {
 }
 
 /** CSV con comillas dobles (RFC 4180). */
-function separarFilas(texto: string, separador: string): string[][] {
+export function separarFilas(texto: string, separador: string): string[][] {
   const filas: string[][] = [];
   let fila: string[] = [];
   let campo = '';

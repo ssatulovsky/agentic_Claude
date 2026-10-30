@@ -11,6 +11,7 @@ import { rutasAdministracion } from './rutas/administracion.js';
 import { rutasAgentes } from './rutas/agentes.js';
 import { rutasAutenticacion } from './rutas/autenticacion.js';
 import { rutasContabilidad } from './rutas/contabilidad.js';
+import { rutasTesoreria } from './rutas/tesoreria.js';
 import { rutasTributario } from './rutas/tributario.js';
 import { rutasMaestros } from './rutas/maestros.js';
 import { rutasNormativaYBitacora } from './rutas/normativa.js';
@@ -117,7 +118,9 @@ export async function crearServidor(deps: Dependencias): Promise<FastifyInstance
             ? new ErrorNegocio('DEMASIADAS_PETICIONES', 'Demasiadas peticiones. Espere un momento.', 429)
             : (error as { validation?: unknown }).validation
               ? new ErrorNegocio('DATOS_INVALIDOS', (error as Error).message, 400)
-              : (error as { statusCode?: number }).statusCode === 415
+              : (error as { statusCode?: number }).statusCode === 413
+                ? new ErrorNegocio('ARCHIVO_DEMASIADO_GRANDE', 'El archivo o los datos enviados exceden el tamaño permitido.', 413)
+                : (error as { statusCode?: number }).statusCode === 415
                 ? new ErrorNegocio('TIPO_CONTENIDO', 'Tipo de contenido no soportado.', 415)
                 : null));
     if (negocio) {
@@ -138,6 +141,7 @@ export async function crearServidor(deps: Dependencias): Promise<FastifyInstance
   await app.register(async (r) => rutasAgentes(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasContabilidad(r, deps), { prefix: '/api' });
   await app.register(async (r) => rutasTributario(r, deps), { prefix: '/api' });
+  await app.register(async (r) => rutasTesoreria(r, deps), { prefix: '/api' });
 
   return app;
 }

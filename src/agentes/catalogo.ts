@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { HERRAMIENTAS_CONTABILIDAD } from './herramientas/contabilidad.js';
 import { HERRAMIENTAS_FASE_0 } from './herramientas/maestros.js';
+import { HERRAMIENTAS_TESORERIA } from './herramientas/tesoreria.js';
 import { HERRAMIENTAS_TRIBUTARIO } from './herramientas/tributario.js';
 import type { DefinicionAgente, DefinicionHerramienta, EspecificacionHerramienta } from './tipos.js';
 
@@ -30,6 +31,8 @@ export const AGENTES: DefinicionAgente[] = [
       'consultar_plan_cuentas',
       'consultar_balance',
       'consultar_f29',
+      'consultar_cuentas_bancarias',
+      'consultar_conciliacion_bancaria',
     ],
   },
   {
@@ -62,6 +65,19 @@ export const AGENTES: DefinicionAgente[] = [
       'consultar_indicador',
     ],
   },
+  {
+    codigo: 'TESORERO',
+    cargo: 'Tesorero',
+    descripcion: 'Cuentas bancarias, cartolas y conciliación bancaria.',
+    instrucciones: `Eres el Tesorero de la empresa. Revisas los movimientos del banco, explicas la conciliación y propones conciliaciones o asientos de los movimientos pendientes; una persona los aprueba. Nunca clasifiques un movimiento sin una regla o una instrucción de la persona: si no hay regla, pregunta qué es (por ejemplo, un retiro del socio, un préstamo, un sueldo o un pago a proveedor).${REGLAS_COMUNES}`,
+    herramientas: [
+      'consultar_cuentas_bancarias',
+      'consultar_conciliacion_bancaria',
+      'sugerir_conciliacion',
+      'proponer_conciliar',
+      'proponer_contabilizar_movimiento',
+    ],
+  },
 ];
 
 export class RegistroAgentes {
@@ -69,7 +85,7 @@ export class RegistroAgentes {
   readonly #agentes = new Map<string, DefinicionAgente>();
 
   constructor(
-    herramientas: DefinicionHerramienta[] = [...HERRAMIENTAS_FASE_0, ...HERRAMIENTAS_CONTABILIDAD, ...HERRAMIENTAS_TRIBUTARIO],
+    herramientas: DefinicionHerramienta[] = [...HERRAMIENTAS_FASE_0, ...HERRAMIENTAS_CONTABILIDAD, ...HERRAMIENTAS_TRIBUTARIO, ...HERRAMIENTAS_TESORERIA],
     agentes: DefinicionAgente[] = AGENTES,
   ) {
     for (const h of herramientas) {
