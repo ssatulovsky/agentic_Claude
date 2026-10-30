@@ -2,7 +2,7 @@ import { sql } from 'kysely';
 import { readFileSync } from 'node:fs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { contextoDeUsuario, enContexto, type Trx } from '../src/db/conexion.js';
-import { aprobarF29, configurarTasaPpm, obtenerF29, prepararF29 } from '../src/tributario/f29.js';
+import { aprobarF29, configurarTasaPpm, configurarTributario, listarF29, obtenerF29, prepararF29 } from '../src/tributario/f29.js';
 import { importarRcv } from '../src/tributario/rcv.js';
 import { leerRcvCsv } from '../src/tributario/rcvCsv.js';
 import { crearEscenario, type Escenario } from './escenario.js';
@@ -54,6 +54,16 @@ beforeAll(async () => {
     [e.empresaA1],
   );
   await comoContador((trx) => configurarTasaPpm(trx, e.empresaA1, '2026-04-01', 0.2, 'Tasa del F29 declarado de agosto 2026 (código 115)'));
+  // Pro Pyme Transparente con solo operaciones exentas: el IVA de compras no es crédito.
+  await comoContador((trx) =>
+    configurarTributario(trx, {
+      empresaId: e.empresaA1,
+      desde: '2026-03-01',
+      regimen: 'PRO_PYME_TRANSPARENTE',
+      ivaComprasNoRecuperable: true,
+      motivo: 'Régimen y operaciones exentas confirmados por la gerencia',
+    }),
+  );
 });
 afterAll(async () => {
   await e.cerrar();
@@ -87,7 +97,12 @@ describe('Archivo real del RCV descargado del SII', () => {
     await importar('VENTA', 4, ENCABEZADO_VENTAS);
     const id = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2026, mes: 4, remanenteAnterior: 0 }));
     const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id));
-    expect(noCero(f.codigos)).toEqual({ '519': 1, '520': 655, '537': 655, '77': 655 });
+    // El SII la registró "Del Giro" con crédito; la empresa solo tiene operaciones exentas,
+    // así que el sistema la declara sin derecho a crédito (564/521) y pide reclasificarla en el SII.
+    expect(noCero(f.codigos)).toEqual({ '564': 1, '521': 3445 });
+    const reclasificar = f.advertencias.find((a) => a.tipo === 'RECLASIFICAR_EN_SII')!;
+    expect(reclasificar.mensaje).toMatch(/código 1/u);
+    expect(reclasificar.detalle).toEqual([expect.objectContaining({ folio: 1001, iva: 655, tipo_compra_sii: 'DEL_GIRO' })]);
   });
 });
 
@@ -229,6 +244,16 @@ describe('Otros impuestos, IVA no retenido y crédito sin ventas afectas', () =>
   });
 
   it('la propuesta muestra el código del otro impuesto y el IVA no retenido, y advierte el crédito sin ventas afectas', async () => {
+    // Para este caso, junio se configura con compras con derecho a crédito.
+    await comoContador((trx) =>
+      configurarTributario(trx, {
+        empresaId: e.empresaA1,
+        desde: '2026-06-01',
+        regimen: 'PRO_PYME_TRANSPARENTE',
+        ivaComprasNoRecuperable: false,
+        motivo: 'Prueba: mes con compras con derecho a crédito',
+      }),
+    );
     await importar(
       'COMPRA',
       6,
@@ -244,5 +269,32 @@ describe('Otros impuestos, IVA no retenido y crédito sin ventas afectas', () =>
     ]);
     expect(f.advertencias.map((a) => a.tipo)).toContain('CREDITO_SIN_VENTAS_AFECTAS');
     expect(f.codigos['520']).toBe(570);
+  });
+});
+
+describe('Configuración tributaria', () => {
+  it('advierte una tasa de PPM que no corresponde al régimen y no la configura un agente', async () => {
+    await comoContador((trx) =>
+      configurarTributario(trx, {
+        empresaId: e.empresaA1,
+        desde: '2026-10-01',
+        regimen: 'PRO_PYME_GENERAL',
+        ivaComprasNoRecuperable: false,
+        motivo: 'Prueba: régimen general con tasa 0,2%',
+      }),
+    );
+    // Septiembre quedó en borrador en el cotejo: se aprueba para que octubre tome su remanente.
+    const [septiembre] = await comoContador((trx) => listarF29(trx, e.empresaA1, 2026, 9));
+    await comoContador((trx) => aprobarF29(trx, septiembre!.id, true));
+    await importar('VENTA', 10, ENCABEZADO_VENTAS);
+    await importar('COMPRA', 10, ENCABEZADO_COMPRAS);
+    const id = await comoContador((trx) => prepararF29(trx, { empresaId: e.empresaA1, anio: 2026, mes: 10 }));
+    const f = await comoContador((trx) => obtenerF29(trx, e.empresaA1, id));
+    expect(f.advertencias.find((a) => a.tipo === 'TASA_PPM_FUERA_DE_REGIMEN')?.mensaje).toMatch(/0\.200%.*PRO_PYME_GENERAL.*0\.125/u);
+    await expect(
+      enContexto(e.db, { usuarioId: e.usuarios.contadorA1.id, empresaId: e.empresaA1, actorTipo: 'AGENTE', actorId: 'ANALISTA_TRIBUTARIO' }, (trx) =>
+        configurarTributario(trx, { empresaId: e.empresaA1, desde: '2026-11-01', regimen: 'OTRO', ivaComprasNoRecuperable: false, motivo: 'Intento del agente' }),
+      ),
+    ).rejects.toThrow(/una persona/u);
   });
 });

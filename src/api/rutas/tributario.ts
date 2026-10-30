@@ -6,6 +6,7 @@ import {
   anularF29,
   aprobarF29,
   configurarTasaPpm,
+  configurarTributario,
   listarF29,
   obtenerF29,
   prepararF29,
@@ -69,6 +70,23 @@ export async function rutasTributario(app: FastifyInstance, deps: Dependencias):
     );
     await enEmpresa(req.sesion!.usuarioId, empresaId, (trx) => configurarTasaPpm(trx, empresaId, d.desde, d.tasa, d.fuente, d.motivoReemplazo));
     return reply.status(201).send({ desde: d.desde, tasa: d.tasa });
+  });
+
+  // ---------------- Configuración tributaria ----------------
+  app.post('/empresas/:empresaId/configuracion-tributaria', async (req, reply) => {
+    const { empresaId } = validar(paramEmpresa, req.params);
+    const d = validar(
+      z.object({
+        desde: fecha.refine((f) => f.endsWith('-01'), 'Debe ser el primer día del mes'),
+        regimen: z.enum(['PRO_PYME_TRANSPARENTE', 'PRO_PYME_GENERAL', 'SEMI_INTEGRADO', 'OTRO']),
+        ivaComprasNoRecuperable: z.boolean(),
+        codigoIvaNoRecuperable: z.number().int().min(1).max(9).optional(),
+        motivo: z.string().trim().min(10).max(500),
+      }),
+      req.body,
+    );
+    const id = await enEmpresa(req.sesion!.usuarioId, empresaId, (trx) => configurarTributario(trx, { empresaId, ...d }));
+    return reply.status(201).send({ id });
   });
 
   // ---------------- F29 ----------------

@@ -176,3 +176,24 @@ export async function listarF29(trx: Trx, empresaId: string, anio?: number, mes?
     folioSii: f.folio_sii,
   }));
 }
+
+export type RegimenTributario = 'PRO_PYME_TRANSPARENTE' | 'PRO_PYME_GENERAL' | 'SEMI_INTEGRADO' | 'OTRO';
+
+export interface ConfiguracionTributaria {
+  empresaId: string;
+  /** Primer día del mes desde el que rige. */
+  desde: string;
+  regimen: RegimenTributario;
+  /** La empresa solo tiene operaciones exentas o no gravadas: el IVA de sus compras no es crédito. */
+  ivaComprasNoRecuperable: boolean;
+  /** Código del SII (1: operaciones exentas o no gravadas). */
+  codigoIvaNoRecuperable?: number;
+  motivo: string;
+}
+
+export async function configurarTributario(trx: Trx, c: ConfiguracionTributaria): Promise<string> {
+  const { rows } = await sql<{ id: string }>`
+    SELECT tributario_configurar(${c.empresaId}::uuid, ${c.desde}::date, ${c.regimen}, ${c.ivaComprasNoRecuperable},
+      ${c.codigoIvaNoRecuperable ?? null}::int, ${c.motivo}) AS id`.execute(trx);
+  return String(rows[0]!.id);
+}
