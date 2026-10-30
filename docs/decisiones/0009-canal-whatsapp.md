@@ -76,11 +76,22 @@ si no pasaron más de 2 horas.
 
 `WHATSAPP_PUENTE_URL`, `WHATSAPP_PUENTE_SECRETO` (32+ caracteres), `WHATSAPP_PUENTE_IPS`,
 `WHATSAPP_NUMERO`, `TRANSCRIPCION_URL`, `TRANSCRIPCION_MODELO`, `TRANSCRIPCION_API_KEY`,
-`TRANSCRIPCION_EXTERNA_AUTORIZADA`.
+`TRANSCRIPCION_EXTERNA_AUTORIZADA`, `WHATSAPP_AVISAR_NO_VINCULADOS` (false con un número
+personal de pruebas).
+
+## Adaptador del conector existente (Baileys)
+
+El conector que ya se usaba (prototipo, WhatsApp Web con la librería Baileys) quedó como un
+proceso aparte, `puente-whatsapp/`, que implementa este contrato. Tiene un modo `PERSONAL`
+para probar con el número de una persona: solo atiende el chat consigo mismo y números
+permitidos, y nunca responde a sus contactos. En el chat consigo mismo solo va al ERP lo que
+empieza con `erp` y lo que sigue mientras esa conversación está abierta (10 minutos), para no
+enviar las notas personales del titular; lo conversado con Meta AI se descarta. Las notas de voz se descargan en el puente y se
+transcriben en el ERP con Whisper local (`docker compose --profile voz`). Instrucciones en
+`puente-whatsapp/README.md`.
 
 ## Pendiente
 
-- Adaptador del conector que se usa hoy (según su tecnología) que implemente este contrato.
 - Respuestas por voz (texto a voz).
 - Avisar la caída del canal por correo a los administradores.
 - Los límites por persona viven en memoria del proceso (ver 0008).

@@ -220,6 +220,7 @@ export async function crearServidor(depsEntrada: Dependencias): Promise<FastifyI
                 : null,
           claveMaestra: c.CLAVE_MAESTRA_CIFRADO,
           plazoConversacionMs: c.IA_PLAZO_CONVERSACION_MS,
+          avisarNoVinculados: c.WHATSAPP_AVISAR_NO_VINCULADOS === 'true',
           registrar: { warn: (d, m) => app.log.warn(d, m), error: (d, m) => app.log.error(d, m) },
         })
       : null;

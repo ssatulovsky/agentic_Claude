@@ -48,6 +48,8 @@ const esquema = z.object({
   WHATSAPP_PUENTE_SECRETO: z.string().min(32).optional(),
   // Direcciones IP desde las que puede llamar el puente (separadas por coma). Vacío = cualquiera (solo firma).
   WHATSAPP_PUENTE_IPS: z.string().optional(),
+  // Avisar a números no vinculados que deben vincularse. Con un número personal de pruebas, false.
+  WHATSAPP_AVISAR_NO_VINCULADOS: z.enum(['true', 'false']).default('true'),
   // Número de WhatsApp de la plataforma, para mostrarlo en la web al vincular.
   WHATSAPP_NUMERO: z.string().regex(/^\+[1-9]\d{7,14}$/u).optional(),
   // Transcripción de notas de voz: servidor compatible con /v1/audio/transcriptions (p. ej. Whisper local).

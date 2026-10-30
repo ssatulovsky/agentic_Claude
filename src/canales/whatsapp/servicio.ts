@@ -115,6 +115,8 @@ export class ServicioWhatsapp {
       /** Clave maestra (hex): de ella se deriva la clave de los códigos de vinculación. */
       claveMaestra: string;
       plazoConversacionMs: number;
+      /** false: a un número no vinculado no se le responde nada (número personal de pruebas). */
+      avisarNoVinculados?: boolean;
       registrar: Registro;
     },
   ) {}
@@ -190,7 +192,9 @@ export class ServicioWhatsapp {
         SIN_VINCULACION_PENDIENTE: 'No hay una vinculación pendiente para este número. Iníciela en la web, en "WhatsApp".',
       };
       // Los intentos fallidos reciben respuesta a lo más 3 veces por hora y número.
-      if (resultado === 'VINCULADO' || this.avisosVinculacion.permitir(m.de)) {
+      // Sin vinculación pendiente para ese número, es un desconocido: con avisos apagados, silencio.
+      const silenciar = resultado === 'SIN_VINCULACION_PENDIENTE' && this.deps.avisarNoVinculados === false;
+      if (resultado === 'VINCULADO' || (!silenciar && this.avisosVinculacion.permitir(m.de))) {
         await this.responder(id, m.de, textos[resultado] ?? 'No se pudo vincular.', null, `VINCULAR:${resultado}`);
       } else {
         await this.marcar(id, 'IGNORADO', null, `VINCULAR:${resultado}`);
@@ -204,7 +208,7 @@ export class ServicioWhatsapp {
     });
     if (!identidad) {
       // A un número desconocido se le avisa a lo más una vez por hora (sin revelar cuentas).
-      if (this.avisosSinVinculo.permitir(m.de)) {
+      if (this.deps.avisarNoVinculados !== false && this.avisosSinVinculo.permitir(m.de)) {
         await this.responder(id, m.de, 'Este número no está vinculado. Ingrese a la web del ERP, opción "WhatsApp", para vincularlo.', null, 'SIN_VINCULO');
       } else {
         await this.marcar(id, 'IGNORADO', null, 'SIN_VINCULO');

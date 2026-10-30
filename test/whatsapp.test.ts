@@ -9,6 +9,7 @@ import { cabecerasFirmadas, firmaValida } from '../src/canales/whatsapp/firma.js
 import { partirTexto, PuenteHttp, type CanalMensajeria } from '../src/canales/whatsapp/puente.js';
 import { TranscriptorCompatible, type Transcriptor } from '../src/canales/whatsapp/transcripcion.js';
 import { cargarConfiguracion } from '../src/config.js';
+import { ServicioWhatsapp } from '../src/canales/whatsapp/servicio.js';
 import type { FabricaModelos } from '../src/ia/enrutador.js';
 import { ServicioAutenticacion } from '../src/seguridad/autenticacion.js';
 import { base32Decodificar, codigoParaPaso, pasoTotp } from '../src/seguridad/totp.js';
@@ -206,6 +207,25 @@ describe('Vinculación del teléfono', () => {
     expect(estado.json()).toMatchObject({ canalConfigurado: true, numeroErp: '+56900000000', vinculo: { telefono: TEL_CONTADOR, estado: 'VERIFICADO' } });
     const { rows } = await e.owner.query(`SELECT accion FROM bitacora WHERE accion LIKE 'WHATSAPP_%' ORDER BY id`);
     expect(rows.map((r: { accion: string }) => r.accion)).toEqual(['WHATSAPP_VINCULACION_INICIADA', 'WHATSAPP_VINCULADO']);
+  });
+
+  it('con un número personal de pruebas no se responde a los contactos no vinculados', async () => {
+    const silencioso = new ServicioWhatsapp({
+      db: e.db,
+      dbAuth: e.dbAuth,
+      registro: new RegistroAgentes(),
+      fabricaModelos: fabrica,
+      canal,
+      transcriptor: null,
+      claveMaestra: CLAVE_PRUEBAS,
+      plazoConversacionMs: 10_000,
+      avisarNoVinculados: false,
+      registrar: { warn() {}, error() {} },
+    });
+    await silencioso.recibir({ id: 'contacto-personal-1', de: '+56966666666', tipo: 'TEXTO', texto: 'Hola Sergio, ¿almorzamos?' });
+    await silencioso.recibir({ id: 'contacto-personal-2', de: '+56966666666', tipo: 'TEXTO', texto: 'VINCULAR 000000' });
+    await silencioso.esperarPendientes();
+    expect(enviados.filter((x) => x.para === '+56966666666')).toEqual([]);
   });
 
   it('los intentos de vinculación fallidos reciben a lo más tres respuestas por hora', async () => {

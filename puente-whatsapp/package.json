@@ -1,0 +1,22 @@
+{
+  "name": "erp-puente-whatsapp",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Puente entre el conector WhatsApp Web (Baileys) y el ERP Agéntico",
+  "type": "module",
+  "scripts": {
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "license": "UNLICENSED",
+  "dependencies": {
+    "@whiskeysockets/baileys": "6.7.24",
+    "qrcode": "1.5.4",
+    "tsx": "4.23.15"
+  },
+  "devDependencies": {
+    "@types/node": "22.20.5",
+    "@types/qrcode": "1.5.5",
+    "typescript": "5.8.3"
+  }
+}
