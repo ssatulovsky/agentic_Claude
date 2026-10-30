@@ -146,8 +146,10 @@ describe('Lector del RCV', () => {
     });
     expect(l.documentos[2]!.tipo_operacion).toBe('IVA_USO_COMUN');
     expect(l.documentos[3]).toMatchObject({ tipo_operacion: 'IVA_NO_RECUPERABLE', iva_no_recuperable: 9_500, codigo_iva_no_recuperable: 1 });
-    // Las columnas que no se usan se informan para validar el formato con un archivo real.
-    expect(l.columnasNoReconocidas).toEqual(expect.arrayContaining(['Fecha Acuse', 'IVA No Retenido', 'Tasa Otro Impuesto']));
+    // Todas las columnas del formato del SII están reconocidas (validado con un archivo real).
+    expect(l.columnasNoReconocidas).toEqual([]);
+    const conExtra = leerRcvCsv(csvCompras(COMPRAS_JUNIO).replace('Tasa Otro Impuesto', 'Columna Nueva'), 'COMPRA');
+    expect(conExtra.columnasNoReconocidas).toEqual(['Columna Nueva']);
   });
 
   it('acepta coma como separador y separador de miles', () => {
