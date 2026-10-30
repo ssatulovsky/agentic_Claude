@@ -4,7 +4,7 @@
  * Todo corre en el servidor: el texto no sale a ningún servicio externo.
  */
 import { spawn } from 'node:child_process';
-import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { mkdtemp, readdir, readFile, rm, stat } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
@@ -49,9 +49,18 @@ export interface NotaDeVoz {
   segundos: number;
 }
 
+const PREFIJO_TEMPORAL = 'erp-voz-';
+
+/** Borra carpetas temporales que quedaron de una ejecución interrumpida (al arrancar el puente). */
+export async function limpiarTemporales(base = tmpdir()): Promise<number> {
+  const restos = (await readdir(base)).filter((x) => x.startsWith(PREFIJO_TEMPORAL));
+  await Promise.all(restos.map((x) => rm(join(base, x), { recursive: true, force: true })));
+  return restos.length;
+}
+
 /** Sintetiza `texto` y lo devuelve como nota de voz de WhatsApp. */
-export async function sintetizarNotaDeVoz(config: ConfiguracionVoz, texto: string): Promise<NotaDeVoz> {
-  const dir = await mkdtemp(join(tmpdir(), 'erp-voz-'));
+export async function sintetizarNotaDeVoz(config: ConfiguracionVoz, texto: string, base = tmpdir()): Promise<NotaDeVoz> {
+  const dir = await mkdtemp(join(base, PREFIJO_TEMPORAL));
   try {
     const wav = join(dir, 'voz.wav');
     const ogg = join(dir, 'voz.ogg');
@@ -77,11 +86,34 @@ export async function sintetizarNotaDeVoz(config: ConfiguracionVoz, texto: strin
   }
 }
 
-/** Cola de a uno: la síntesis usa CPU; no se lanzan varias a la vez. */
+/**
+ * Cola de a uno: la síntesis usa CPU; no se lanzan varias a la vez. Tiene un máximo de
+ * pendientes (las que sobran se descartan) y una tarea que esperó demasiado ya no se hace:
+ * una nota de voz que llega minutos tarde confunde más de lo que ayuda.
+ */
 export class ColaSerial {
   private cola: Promise<unknown> = Promise.resolve();
-  agregar<T>(tarea: () => Promise<T>): Promise<T> {
-    const r = this.cola.then(tarea, tarea);
+  private pendientes = 0;
+
+  constructor(
+    private readonly maxPendientes = 10,
+    private readonly esperaMaximaMs = 120_000,
+  ) {}
+
+  /** null si la cola está llena; si la tarea esperó demasiado, se resuelve con 'VENCIDA'. */
+  agregar<T>(tarea: () => Promise<T>): Promise<T | 'VENCIDA'> | null {
+    if (this.pendientes >= this.maxPendientes) return null;
+    this.pendientes++;
+    const encolada = Date.now();
+    const ejecutar = async (): Promise<T | 'VENCIDA'> => {
+      try {
+        if (Date.now() - encolada > this.esperaMaximaMs) return 'VENCIDA';
+        return await tarea();
+      } finally {
+        this.pendientes--;
+      }
+    };
+    const r = this.cola.then(ejecutar, ejecutar);
     this.cola = r.catch(() => undefined);
     return r;
   }

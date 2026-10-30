@@ -14,7 +14,7 @@ import { join } from 'node:path';
 import makeWASocket, { DisconnectReason, downloadMediaMessage, fetchLatestBaileysVersion, useMultiFileAuthState, type WASocket } from '@whiskeysockets/baileys';
 import QRCode from 'qrcode';
 import { cabecerasFirmadas, CABECERA_FIRMA, CABECERA_MARCA, firmaValida } from '../../src/canales/whatsapp/firma.js';
-import { ColaSerial, leerConfiguracionVoz, sintetizarNotaDeVoz } from './voz.js';
+import { ColaSerial, leerConfiguracionVoz, limpiarTemporales, sintetizarNotaDeVoz } from './voz.js';
 import { ConjuntoAcotado, decidir, destinoPermitido, jidDesdeTelefono, leerConfiguracion, MARCA_PUENTE, telefonoDesdeJid, usuarioDeJid, type MensajeEntranteWa } from './nucleo.js';
 
 const config = leerConfiguracion(process.env);
@@ -72,13 +72,21 @@ async function enviarTexto(telefono: string, texto: string): Promise<void> {
 /** Nota de voz con la respuesta (Piper + ffmpeg). Si falla, la respuesta ya llegó por escrito. */
 function enviarVoz(telefono: string, texto: string): void {
   if (!configVoz) return;
-  void colaVoz
-    .agregar(async () => {
-      const nota = await sintetizarNotaDeVoz(configVoz, texto);
-      if (!sock || !conectado) return;
-      const enviado = await sock.sendMessage(jidDesdeTelefono(telefono), { audio: nota.audio, mimetype: nota.mimetype, ptt: true, seconds: nota.segundos });
-      if (enviado?.key?.id) enviados.add(enviado.key.id);
-      log('voz_enviada', { segundos: nota.segundos });
+  const tarea = colaVoz.agregar(async () => {
+    if (!sock || !conectado) return;
+    const nota = await sintetizarNotaDeVoz(configVoz, texto);
+    if (!sock || !conectado) return;
+    const enviado = await sock.sendMessage(jidDesdeTelefono(telefono), { audio: nota.audio, mimetype: nota.mimetype, ptt: true, seconds: nota.segundos });
+    if (enviado?.key?.id) enviados.add(enviado.key.id);
+    log('voz_enviada', { segundos: nota.segundos });
+  });
+  if (!tarea) {
+    log('voz_descartada', { motivo: 'COLA_LLENA' });
+    return;
+  }
+  void tarea
+    .then((r) => {
+      if (r === 'VENCIDA') log('voz_descartada', { motivo: 'ESPERA_EXCESIVA' });
     })
     .catch((e) => log('error_voz', { error: (e as Error).message }));
 }
@@ -267,6 +275,7 @@ createServer(async (req, res) => {
 }).listen(config.puerto, config.host, () => log('escuchando', { host: config.host, puerto: config.puerto }));
 
 setInterval(() => void latido(), 60_000).unref();
+if (configVoz) void limpiarTemporales().then((n) => n && log('temporales_borrados', { carpetas: n }));
 void conectar().catch((e) => {
   log('error_conexion', { error: (e as Error).message });
   process.exitCode = 1;

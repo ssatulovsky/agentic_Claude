@@ -169,6 +169,13 @@ describe('Puente firmado', () => {
     expect(textoParaVoz('*Saldo* al cierre: $790.000 ✅\n\n- Retiros: $2.991.000\n- Tasa: 0,25%\nVer https://erp.cl/x')).toBe(
       'Saldo al cierre: 790000 pesos. Retiros: 2991000 pesos. Tasa: 0 coma 25%. Ver el enlace',
     );
+    expect(textoParaVoz('$-1.234 y -$5.000; US$ 0,05')).toBe('menos 1234 pesos y menos 5000 pesos; 0 coma cero 5 dólares');
+    expect(textoParaVoz('RUT 76.123.456-7, cuenta 1.1.02, UF 36.123,05')).toBe('RUT 76 123 456 guion 7, cuenta 1.1.02, UF 36123 coma cero 5');
+    expect(textoParaVoz('Monto $1.2345')).toBe('Monto $1.2345');
+    expect(textoParaVoz('la variable saldo_final y _esto_ importa')).toBe('la variable saldo_final y esto importa');
+    const inicio = Date.now();
+    textoParaVoz(`a\n${' '.repeat(50_000)}`);
+    expect(Date.now() - inicio).toBeLessThan(200);
     const largo = textoParaVoz('Una oración de prueba. '.repeat(100));
     expect(largo.length).toBeLessThan(760);
     expect(largo.endsWith('El detalle completo va por escrito.')).toBe(true);

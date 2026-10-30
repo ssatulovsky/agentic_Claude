@@ -3,7 +3,7 @@ import { chmodSync, mkdtempSync, readdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ColaSerial, leerConfiguracionVoz, sintetizarNotaDeVoz } from '../puente-whatsapp/src/voz.js';
+import { ColaSerial, leerConfiguracionVoz, limpiarTemporales, sintetizarNotaDeVoz } from '../puente-whatsapp/src/voz.js';
 
 /** Programas de reemplazo: "piper" escribe un WAV de 1 s; "ffmpeg" copia y marca OGG. */
 function programasFalsos(dir: string) {
@@ -58,13 +58,21 @@ describe('Nota de voz del puente (Piper + ffmpeg)', () => {
   it('pasa el texto por la entrada estándar (sin shell), devuelve OGG/Opus y no deja archivos', async () => {
     const dir = mkdtempSync(join(tmpdir(), 'voz-prueba-'));
     const { piper, ffmpeg } = programasFalsos(dir);
-    const antes = readdirSync(tmpdir()).filter((x) => x.startsWith('erp-voz-')).length;
+    const base = mkdtempSync(join(tmpdir(), 'voz-base-'));
     const texto = 'Saldo: 790000 pesos; "comillas" $(rm -rf /) `x`';
-    const nota = await sintetizarNotaDeVoz({ piperBin: piper, modelo: '/m.onnx', ffmpegBin: ffmpeg }, texto);
+    const nota = await sintetizarNotaDeVoz({ piperBin: piper, modelo: '/m.onnx', ffmpegBin: ffmpeg }, texto, base);
     expect(nota.audio.subarray(0, 4).toString()).toBe('OggS');
     expect(nota).toMatchObject({ mimetype: 'audio/ogg; codecs=opus', segundos: 1 });
     expect(execFileSync('cat', [join(dir, 'texto.txt')], { encoding: 'utf8' })).toBe(texto);
-    expect(readdirSync(tmpdir()).filter((x) => x.startsWith('erp-voz-')).length).toBe(antes);
+    expect(readdirSync(base)).toEqual([]);
+  });
+
+  it('al arrancar se borran los temporales de una ejecución interrumpida', async () => {
+    const base = mkdtempSync(join(tmpdir(), 'voz-base-'));
+    mkdtempSync(join(base, 'erp-voz-'));
+    writeFileSync(join(base, 'otro.txt'), 'x');
+    expect(await limpiarTemporales(base)).toBe(1);
+    expect(readdirSync(base)).toEqual(['otro.txt']);
   });
 
   it.runIf(tieneFfmpegConOpus)('con ffmpeg real, el resultado es una nota de voz OGG/Opus válida', async () => {
@@ -79,14 +87,22 @@ describe('Nota de voz del puente (Piper + ffmpeg)', () => {
     await expect(sintetizarNotaDeVoz({ piperBin: '/no/existe/piper', modelo: '/m.onnx', ffmpegBin: 'ffmpeg' }, 'hola')).rejects.toThrow();
   });
 
-  it('la cola sintetiza de a una, aunque una falle', async () => {
-    const cola = new ColaSerial();
+  it('la cola sintetiza de a una aunque una falle, con tope de pendientes y sin tareas vencidas', async () => {
+    const cola = new ColaSerial(3, 1000);
     const orden: number[] = [];
     const espera = (ms: number, n: number) => () => new Promise<void>((r) => setTimeout(() => (orden.push(n), r()), ms));
     const a = cola.agregar(espera(30, 1));
     const b = cola.agregar(() => Promise.reject(new Error('x')));
     const c = cola.agregar(espera(1, 3));
+    expect(cola.agregar(espera(1, 4))).toBeNull();
     await Promise.allSettled([a, b, c]);
     expect(orden).toEqual([1, 3]);
+    // Una tarea que esperó más de lo permitido no se ejecuta.
+    const lenta = new ColaSerial(5, 10);
+    const primera = lenta.agregar(espera(40, 5));
+    const vencida = lenta.agregar(espera(1, 6));
+    expect(await primera).toBeUndefined();
+    expect(await vencida).toBe('VENCIDA');
+    expect(orden).toEqual([1, 3, 5]);
   });
 });
