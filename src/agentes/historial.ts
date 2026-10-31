@@ -21,3 +21,16 @@ export async function historialConversacion(trx: Trx, empresaId: string, convers
     .filter((r) => r.texto)
     .map((r): MensajeConversacion => (r.tipo === 'MENSAJE_USUARIO' ? { rol: 'usuario', texto: r.texto! } : { rol: 'asistente', texto: r.texto! }));
 }
+
+/**
+ * Resultados de herramientas de turnos anteriores de una conversación (llamar después de
+ * historialConversacion, que verifica que sea de quien pregunta). Respaldan las cifras que el
+ * agente repite sin volver a consultar.
+ */
+export async function fuentesDeConversacion(trx: Trx, empresaId: string, conversacionId: string): Promise<unknown[]> {
+  const { rows } = await sql<{ resultado: unknown }>`
+    SELECT contenido -> 'resultado' AS resultado FROM trazas_agente
+    WHERE conversacion_id = ${conversacionId}::uuid AND empresa_id = ${empresaId}::uuid AND tipo = 'RESULTADO_HERRAMIENTA'
+    ORDER BY creado_en DESC, paso DESC LIMIT 50`.execute(trx);
+  return rows.map((r) => r.resultado);
+}

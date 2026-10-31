@@ -2,12 +2,13 @@ import { useCallback, useEffect, useState } from 'react';
 import { api, ErrorApi, type Empresa, type Yo } from './api';
 import { Asistentes } from './paginas/Asistentes';
 import { Ingreso } from './paginas/Ingreso';
+import { Propuestas } from './paginas/Propuestas';
 import { Parametrizacion } from './paginas/Parametrizacion';
 import { ReglasConciliacion } from './paginas/ReglasConciliacion';
 import { UsoIa } from './paginas/UsoIa';
 import { WhatsApp } from './paginas/WhatsApp';
 
-type Pagina = 'asistentes' | 'parametrizacion' | 'reglas' | 'ia' | 'whatsapp';
+type Pagina = 'asistentes' | 'propuestas' | 'parametrizacion' | 'reglas' | 'ia' | 'whatsapp';
 
 export function App() {
   const [yo, setYo] = useState<Yo | null>(null);
@@ -71,6 +72,9 @@ export function App() {
           <button className={pagina === 'asistentes' ? 'activo' : ''} onClick={() => setPagina('asistentes')}>
             Asistentes
           </button>
+          <button className={pagina === 'propuestas' ? 'activo' : ''} onClick={() => setPagina('propuestas')}>
+            Propuestas
+          </button>
           <button className={pagina === 'parametrizacion' ? 'activo' : ''} onClick={() => setPagina('parametrizacion')}>
             Parametrización contable
           </button>
@@ -116,6 +120,8 @@ export function App() {
           <p>No tiene empresas asignadas.</p>
         ) : pagina === 'asistentes' ? (
           <Asistentes key={empresa.id} empresa={empresa} />
+        ) : pagina === 'propuestas' ? (
+          <Propuestas key={empresa.id} empresa={empresa} puedeAprobar={permisos.has('agentes.aprobar')} />
         ) : pagina === 'ia' ? (
           <UsoIa key={empresa.id} empresa={empresa} />
         ) : pagina === 'parametrizacion' ? (

@@ -34,6 +34,19 @@ export interface DefinicionHerramienta<E = unknown, S = unknown> {
   ejecutar: (ctx: ContextoHerramienta, entrada: E) => Promise<S>;
   /** Texto breve para la persona que debe aprobar una propuesta. */
   resumir?: (entrada: E) => string;
+  /** Revisiones propias del Contralor para esta herramienta (criterio contable, montos, fechas). */
+  revisar?: (ctx: ContextoHerramienta, entrada: E) => Promise<Hallazgo[]>;
+  /**
+   * false si la acción tiene efectos fuera de la base de datos (p. ej. enviar un DTE al SII):
+   * el Contralor no la ensaya. Por omisión, se ensaya y se deshace.
+   */
+  ensayable?: boolean;
+}
+
+export interface Hallazgo {
+  nivel: 'BLOQUEANTE' | 'OBSERVACION';
+  codigo: string;
+  mensaje: string;
 }
 
 export interface DefinicionAgente {
@@ -47,7 +60,7 @@ export interface DefinicionAgente {
 
 export type ResultadoHerramienta =
   | { estado: 'EJECUTADA'; resultado: unknown }
-  | { estado: 'PROPUESTA_CREADA'; propuestaId: string; resumen: string }
+  | { estado: 'PROPUESTA_CREADA'; propuestaId: string; resumen: string; dictamenContralor: 'CONFORME' | 'OBSERVADA'; hallazgos: Hallazgo[] }
   | { estado: 'DENEGADA'; motivo: MotivoDenegacion; mensaje: string };
 
 export type MotivoDenegacion =
@@ -57,7 +70,8 @@ export type MotivoDenegacion =
   | 'MODULO_NO_CONTRATADO'
   | 'AGENTE_DESACTIVADO'
   | 'SIN_PERMISO'
-  | 'ERROR_NEGOCIO';
+  | 'ERROR_NEGOCIO'
+  | 'RECHAZADA_POR_CONTRALOR';
 
 // ---------------------------------------------------------------------------
 // Interfaz con el modelo de lenguaje (independiente del proveedor)

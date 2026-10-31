@@ -5,7 +5,8 @@ import { enContexto, type ContextoSeguridad, type Db, type Trx } from '../db/con
 import { ErrorNegocio, noEncontrado, sinPermiso, traducirErrorBaseDatos } from '../errores.js';
 import { moduloVigente, permisosEnEmpresa } from '../seguridad/permisos.js';
 import type { RegistroAgentes } from './catalogo.js';
-import type { DefinicionHerramienta, MotivoDenegacion, ResultadoHerramienta } from './tipos.js';
+import { revisarPropuesta } from './contralor.js';
+import type { DefinicionHerramienta, Hallazgo, MotivoDenegacion, ResultadoHerramienta } from './tipos.js';
 
 export interface Solicitante {
   usuarioId: string;
@@ -24,7 +25,8 @@ export interface PeticionHerramienta {
   paso?: number;
 }
 
-const hoy = () => new Date().toISOString().slice(0, 10);
+/** Fecha de hoy en Chile (no en UTC: después de las 21:00 ya sería mañana). */
+export const hoy = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Santiago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 
 function contextoAgente(agenteCodigo: string, s: Solicitante): ContextoSeguridad & { empresaId: string } {
   // El agente actúa con la identidad de la persona que pregunta: la base de datos
@@ -40,7 +42,16 @@ export async function registrarTraza(
     usuarioId: string;
     agenteCodigo: string;
     paso: number;
-    tipo: 'MENSAJE_USUARIO' | 'LLAMADA_HERRAMIENTA' | 'RESULTADO_HERRAMIENTA' | 'DENEGADO' | 'PROPUESTA_CREADA' | 'RESPUESTA' | 'ERROR';
+    tipo:
+      | 'MENSAJE_USUARIO'
+      | 'LLAMADA_HERRAMIENTA'
+      | 'RESULTADO_HERRAMIENTA'
+      | 'DENEGADO'
+      | 'PROPUESTA_CREADA'
+      | 'RESPUESTA'
+      | 'ERROR'
+      | 'REVISION_CONTRALOR'
+      | 'CONTROL_CIFRAS';
     contenido: unknown;
   },
 ): Promise<void> {
@@ -152,21 +163,59 @@ export async function ejecutarHerramienta(db: Db, registro: RegistroAgentes, p: 
 
     if (!ejecutaDirecto) {
       const resumen = herramienta.resumir?.(entrada.data) ?? `${herramienta.nombre}: ${JSON.stringify(entrada.data)}`;
-      const propuesta = await trx
-        .insertInto('propuestas_agente')
-        .values({
-          empresa_id: p.solicitante.empresaId,
-          agente_codigo: p.agenteCodigo,
-          herramienta: herramienta.nombre,
-          autonomia: herramienta.autonomia === 'EJECUTAR_CON_APROBACION' ? 'EJECUTAR_CON_APROBACION' : 'PROPONER',
-          solicitado_por: p.solicitante.usuarioId,
-          entrada: JSON.stringify(entrada.data),
-          resumen,
-        })
-        .returning('id')
-        .executeTakeFirstOrThrow();
-      await traza('PROPUESTA_CREADA', { herramienta: herramienta.nombre, propuestaId: propuesta.id, resumen });
-      return { estado: 'PROPUESTA_CREADA', propuestaId: propuesta.id, resumen };
+      const propuestaId = randomUUID();
+      const filaPropuesta = (dictamen: 'CONFORME' | 'OBSERVADA' | null, hallazgos: Hallazgo[]) => ({
+        id: propuestaId,
+        empresa_id: p.solicitante.empresaId,
+        agente_codigo: p.agenteCodigo,
+        herramienta: herramienta.nombre,
+        autonomia: herramienta.autonomia === 'EJECUTAR_CON_APROBACION' ? ('EJECUTAR_CON_APROBACION' as const) : ('PROPONER' as const),
+        solicitado_por: p.solicitante.usuarioId,
+        entrada: JSON.stringify(entrada.data),
+        resumen,
+        dictamen_contralor: dictamen,
+        hallazgos_contralor: JSON.stringify(hallazgos),
+      });
+
+      // El Contralor revisa; el ensayo usa una propuesta borrador (como en la aprobación) que se descarta.
+      const revision = await revisarPropuesta(
+        trx,
+        { trx, seguridad: ctx, agenteCodigo: p.agenteCodigo, fecha: p.fecha, propuestaId },
+        herramienta,
+        entrada.data,
+        async () => {
+          await trx.insertInto('propuestas_agente').values(filaPropuesta(null, [])).execute();
+        },
+      );
+      const registrarRevision = (idPropuesta: string | null) =>
+        trx
+          .insertInto('revisiones_contralor')
+          .values({
+            empresa_id: p.solicitante.empresaId,
+            agente_codigo: p.agenteCodigo,
+            herramienta: herramienta.nombre,
+            solicitado_por: p.solicitante.usuarioId,
+            conversacion_id: conversacionId,
+            propuesta_id: idPropuesta,
+            dictamen: revision.dictamen,
+            hallazgos: JSON.stringify(revision.hallazgos),
+            resumen,
+          })
+          .execute();
+      await traza('REVISION_CONTRALOR', { herramienta: herramienta.nombre, dictamen: revision.dictamen, hallazgos: revision.hallazgos });
+
+      if (revision.dictamen === 'RECHAZADA') {
+        await registrarRevision(null);
+        const detalle = revision.hallazgos
+          .filter((h) => h.nivel === 'BLOQUEANTE')
+          .map((h) => (/[.!?]$/u.test(h.mensaje.trim()) ? h.mensaje.trim() : `${h.mensaje.trim()}.`))
+          .join(' ');
+        return denegar('RECHAZADA_POR_CONTRALOR', `El Contralor rechazó la propuesta, no llegó a nadie: ${detalle} Corríjala o pregunte a la persona.`);
+      }
+      await trx.insertInto('propuestas_agente').values(filaPropuesta(revision.dictamen, revision.hallazgos)).execute();
+      await registrarRevision(propuestaId);
+      await traza('PROPUESTA_CREADA', { herramienta: herramienta.nombre, propuestaId, resumen, dictamen: revision.dictamen });
+      return { estado: 'PROPUESTA_CREADA', propuestaId, resumen, dictamenContralor: revision.dictamen, hallazgos: revision.hallazgos };
     }
 
     const resultado = await ejecutarAislado(trx, () =>
@@ -258,6 +307,13 @@ export async function resolverPropuesta(
       await marcar('RECHAZADA', undefined, motivo);
       return { estado: 'RECHAZADA' };
     }
+    if (propuesta.dictamen_contralor === 'OBSERVADA' && (motivo ?? '').trim().length < 5) {
+      throw new ErrorNegocio(
+        'MOTIVO_REQUERIDO',
+        'La propuesta tiene observaciones del Contralor: para aprobarla, indique por qué (al menos 5 caracteres).',
+        422,
+      );
+    }
 
     if (!permisos.has(herramienta.permiso)) throw sinPermiso(herramienta.permiso);
     if (herramienta.modulo && !(await moduloVigente(trx, revisor.empresaId, herramienta.modulo, hoy()))) {
@@ -268,7 +324,8 @@ export async function resolverPropuesta(
       herramienta.ejecutar({ trx, seguridad: ctx, agenteCodigo: propuesta.agente_codigo, fecha: hoy(), propuestaId }, entrada),
     );
     if (!resultado.ok) {
-      await marcar('FALLIDA', { error: resultado.error.codigo }, resultado.error.message);
+      // El error queda en el resultado; el motivo de la persona que aprobó se conserva.
+      await marcar('FALLIDA', { error: resultado.error.codigo, mensaje: resultado.error.message }, motivo);
       return { estado: 'FALLIDA', resultado: { error: resultado.error.message } };
     }
     await marcar('EJECUTADA', resultado.valor, motivo);

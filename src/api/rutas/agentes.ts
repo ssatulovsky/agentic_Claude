@@ -3,7 +3,7 @@ import { z } from 'zod';
 import { sql } from 'kysely';
 import { conversar } from '../../agentes/conversacion.js';
 import { resolverPropuesta } from '../../agentes/ejecutor.js';
-import { historialConversacion } from '../../agentes/historial.js';
+import { fuentesDeConversacion, historialConversacion } from '../../agentes/historial.js';
 import { ocuparConsulta } from '../../agentes/limites.js';
 import type { MensajeConversacion } from '../../agentes/tipos.js';
 import { ModeloEnrutado } from '../../ia/enrutador.js';
@@ -38,10 +38,11 @@ export async function rutasAgentes(app: FastifyInstance, deps: Dependencias): Pr
         );
       }
       const conversacionId = d.conversacionId ?? crypto.randomUUID();
-      const historial = await enContexto(deps.db, contextoDeUsuario(usuarioId, empresaId), async (trx) => {
+      const { historial, fuentesPrevias } = await enContexto(deps.db, contextoDeUsuario(usuarioId, empresaId), async (trx) => {
         await exigirPermiso(trx, empresaId, 'agentes.consultar');
-        if (!d.conversacionId) return [] as MensajeConversacion[];
-        return historialConversacion(trx, empresaId, conversacionId);
+        if (!d.conversacionId) return { historial: [] as MensajeConversacion[], fuentesPrevias: [] as unknown[] };
+        const historial = await historialConversacion(trx, empresaId, conversacionId);
+        return { historial, fuentesPrevias: await fuentesDeConversacion(trx, empresaId, conversacionId) };
       });
       const liberar = ocuparConsulta(usuarioId, empresaId);
       const modelo = new ModeloEnrutado(deps.db, deps.fabricaModelos!, {
@@ -57,9 +58,10 @@ export async function rutasAgentes(app: FastifyInstance, deps: Dependencias): Pr
         solicitante: { usuarioId, empresaId },
         mensaje: d.mensaje,
         historial,
+        fuentesPrevias,
         conversacionId,
       }).finally(liberar);
-      return { conversacionId, respuesta: r.respuesta, pasos: r.pasos, modelos: modelo.intentos };
+      return { conversacionId, respuesta: r.respuesta, pasos: r.pasos, modelos: modelo.intentos, cifrasSinRespaldo: r.cifrasSinRespaldo };
     },
   );
 
@@ -97,6 +99,8 @@ export async function rutasAgentes(app: FastifyInstance, deps: Dependencias): Pr
           'motivo',
           'creado_en',
           'vence_en',
+          'dictamen_contralor',
+          'hallazgos_contralor',
         ])
         .where('empresa_id', '=', empresaId)
         .orderBy('creado_en', 'desc')

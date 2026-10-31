@@ -2,7 +2,11 @@ import { z } from 'zod';
 import { registrarAsiento } from '../../contabilidad/libroDiario.js';
 import { balanceOchoColumnas, libroMayor } from '../../contabilidad/reportes.js';
 import { aCentavos, deCentavos, formatoPesos } from '../../utilidades/montos.js';
-import type { DefinicionHerramienta } from '../tipos.js';
+import { sql } from 'kysely';
+import type { DefinicionHerramienta, Hallazgo } from '../tipos.js';
+
+/** Monto desde el cual el Contralor pide una revisión con motivo, si la empresa no fijó otro. */
+export const UMBRAL_OBSERVACION_ASIENTO = 10_000_000;
 
 const fecha = z.string().regex(/^\d{4}-\d{2}-\d{2}$/u).describe('Fecha AAAA-MM-DD');
 // Números grandes como texto: un número JSON mayor que 2^53 pierde precisión en silencio.
@@ -80,6 +84,52 @@ export const proponerAsiento: DefinicionHerramienta<z.infer<typeof entradaAsient
       .map((l) => `${l.cuenta} ${l.debe ? `D ${formatoPesos(aCentavos(l.debe))}` : `H ${formatoPesos(aCentavos(l.haber ?? 0))}`}`)
       .join('; ');
     return `Asiento del ${a.fecha} por ${formatoPesos(total)}: "${a.glosa}". ${detalle}`;
+  },
+  /** Criterio del Contralor sobre un asiento propuesto (además del ensayo en la base). */
+  async revisar({ trx, seguridad, agenteCodigo, fecha: hoy }, a) {
+    const hallazgos: Hallazgo[] = [];
+    const total = a.lineas.reduce((s, l) => s + aCentavos(l.debe ?? 0), 0n);
+    const dias = (Date.parse(hoy) - Date.parse(a.fecha)) / 86_400_000;
+    if (dias < 0) {
+      hallazgos.push({ nivel: 'OBSERVACION', codigo: 'FECHA_FUTURA', mensaje: `El asiento tiene fecha futura (${a.fecha}).` });
+    } else if (dias > 60) {
+      hallazgos.push({ nivel: 'OBSERVACION', codigo: 'FECHA_ANTIGUA', mensaje: `El asiento es de hace más de 60 días (${a.fecha}): revise que el período corresponda.` });
+    }
+    const config = await trx
+      .selectFrom('agentes_config_empresa')
+      .select('parametros')
+      .where('empresa_id', '=', seguridad.empresaId)
+      .where('agente_codigo', '=', agenteCodigo)
+      .executeTakeFirst();
+    const umbralConfig = Number((config?.parametros as { umbral_observacion_asiento?: unknown } | undefined)?.umbral_observacion_asiento);
+    // Umbral configurado: entero de al menos $1 y bajo el máximo de un asiento; si no, el de omisión.
+    const umbral = Number.isInteger(umbralConfig) && umbralConfig >= 1 && umbralConfig <= 999_999_999_999 ? umbralConfig : UMBRAL_OBSERVACION_ASIENTO;
+    if (total >= aCentavos(umbral)) {
+      hallazgos.push({
+        nivel: 'OBSERVACION',
+        codigo: 'MONTO_RELEVANTE',
+        mensaje: `El asiento es por ${formatoPesos(total)}, igual o mayor al umbral de revisión de ${formatoPesos(aCentavos(umbral))}.`,
+      });
+    }
+    if (a.glosa.trim().length < 10) {
+      hallazgos.push({ nivel: 'OBSERVACION', codigo: 'GLOSA_INSUFICIENTE', mensaje: 'La glosa es muy breve para explicar el asiento.' });
+    }
+    const cuentasDebe = new Set(a.lineas.filter((l) => aCentavos(l.debe ?? 0) > 0n).map((l) => l.cuenta));
+    const mismas = a.lineas.filter((l) => aCentavos(l.haber ?? 0) > 0n && cuentasDebe.has(l.cuenta)).map((l) => l.cuenta);
+    if (mismas.length > 0) {
+      hallazgos.push({ nivel: 'OBSERVACION', codigo: 'CUENTA_EN_DEBE_Y_HABER', mensaje: `La cuenta ${[...new Set(mismas)].join(', ')} está en el debe y en el haber.` });
+    }
+    // Un asiento igual (fecha, total y glosa) ya registrado.
+    const { rows } = await sql<{ numero: number }>`
+      SELECT x.numero FROM asientos x
+      WHERE x.empresa_id = ${seguridad.empresaId}::uuid AND x.fecha = ${a.fecha}::date AND x.total = ${deCentavos(total)}::numeric
+        AND lower(trim(x.glosa)) = lower(trim(${a.glosa})) AND x.tipo <> 'REVERSA'
+        AND NOT EXISTS (SELECT 1 FROM asientos r WHERE r.reversa_de = x.id)
+      LIMIT 1`.execute(trx);
+    if (rows[0]) {
+      hallazgos.push({ nivel: 'OBSERVACION', codigo: 'POSIBLE_DUPLICADO', mensaje: `Ya existe el asiento N° ${rows[0].numero} con la misma fecha, total y glosa.` });
+    }
+    return hallazgos;
   },
   async ejecutar({ trx, seguridad, propuestaId }, a) {
     const r = await registrarAsiento(trx, {

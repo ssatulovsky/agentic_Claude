@@ -1,6 +1,7 @@
 import { z } from 'zod';
 import { HERRAMIENTAS_CONTABILIDAD } from './herramientas/contabilidad.js';
 import { HERRAMIENTAS_FASE_0 } from './herramientas/maestros.js';
+import { HERRAMIENTAS_CONTRALOR } from './herramientas/contralor.js';
 import { HERRAMIENTAS_TESORERIA } from './herramientas/tesoreria.js';
 import { HERRAMIENTAS_TRIBUTARIO } from './herramientas/tributario.js';
 import type { DefinicionAgente, DefinicionHerramienta, EspecificacionHerramienta } from './tipos.js';
@@ -33,7 +34,15 @@ export const AGENTES: DefinicionAgente[] = [
       'consultar_f29',
       'consultar_cuentas_bancarias',
       'consultar_conciliacion_bancaria',
+      'consultar_revisiones_contralor',
     ],
+  },
+  {
+    codigo: 'CONTRALOR',
+    cargo: 'Contralor',
+    descripcion: 'Revisa cada propuesta de los agentes antes de que llegue a una persona y controla las cifras de sus respuestas.',
+    instrucciones: `Eres el Contralor de la empresa. Eres independiente de los demás agentes: no propones ni ejecutas nada. Cada propuesta de un agente pasa por tu revisión automática (ensayo con las validaciones del sistema, duplicados y criterios contables) y cada cifra de una respuesta se contrasta con los datos consultados. Explicas a la persona qué revisaste, qué rechazaste u observaste y por qué.${REGLAS_COMUNES}`,
+    herramientas: ['consultar_revisiones_contralor', 'consultar_plan_cuentas', 'consultar_balance'],
   },
   {
     codigo: 'CONTADOR_GENERAL',
@@ -85,7 +94,13 @@ export class RegistroAgentes {
   readonly #agentes = new Map<string, DefinicionAgente>();
 
   constructor(
-    herramientas: DefinicionHerramienta[] = [...HERRAMIENTAS_FASE_0, ...HERRAMIENTAS_CONTABILIDAD, ...HERRAMIENTAS_TRIBUTARIO, ...HERRAMIENTAS_TESORERIA],
+    herramientas: DefinicionHerramienta[] = [
+      ...HERRAMIENTAS_FASE_0,
+      ...HERRAMIENTAS_CONTABILIDAD,
+      ...HERRAMIENTAS_TRIBUTARIO,
+      ...HERRAMIENTAS_TESORERIA,
+      ...HERRAMIENTAS_CONTRALOR,
+    ],
     agentes: DefinicionAgente[] = AGENTES,
   ) {
     for (const h of herramientas) {

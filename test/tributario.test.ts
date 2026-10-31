@@ -463,9 +463,12 @@ describe('Agente Analista Tributario', () => {
     expect(sinPermiso).toMatchObject({ estado: 'DENEGADA', motivo: 'SIN_PERMISO' });
   });
 
-  it('preparar el F29 queda como propuesta si la empresa no autorizó al agente', async () => {
+  it('preparar el F29 pasa por el Contralor: sin el RCV del mes, la propuesta no llega a nadie', async () => {
     const r = await usar(e.usuarios.contadorA1.id, 'preparar_f29', { anio: 2026, mes: 8, remanenteAnterior: 0 });
-    expect(r).toMatchObject({ estado: 'PROPUESTA_CREADA' });
+    expect(r).toMatchObject({ estado: 'DENEGADA', motivo: 'RECHAZADA_POR_CONTRALOR' });
+    if (r.estado === 'DENEGADA') expect(r.mensaje).toMatch(/Falta importar el registro de ventas de 08-2026/u);
+    const { rows } = await e.owner.query(`SELECT count(*)::int AS n FROM propuestas_agente WHERE empresa_id = $1 AND herramienta = 'preparar_f29'`, [e.empresaA1]);
+    expect(rows[0]).toEqual({ n: 0 });
   });
 });
 
