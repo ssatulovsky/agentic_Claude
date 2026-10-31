@@ -25,7 +25,8 @@ export interface PeticionHerramienta {
   paso?: number;
 }
 
-const hoy = () => new Date().toISOString().slice(0, 10);
+/** Fecha de hoy en Chile (no en UTC: después de las 21:00 ya sería mañana). */
+export const hoy = () => new Intl.DateTimeFormat('en-CA', { timeZone: 'America/Santiago', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
 
 function contextoAgente(agenteCodigo: string, s: Solicitante): ContextoSeguridad & { empresaId: string } {
   // El agente actúa con la identidad de la persona que pregunta: la base de datos
@@ -176,16 +177,16 @@ export async function ejecutarHerramienta(db: Db, registro: RegistroAgentes, p: 
         hallazgos_contralor: JSON.stringify(hallazgos),
       });
 
-      // El Contralor revisa con una propuesta borrador (para ensayar como en la aprobación) que se descarta.
-      await sql`SAVEPOINT propuesta_borrador`.execute(trx);
-      let revision: Awaited<ReturnType<typeof revisarPropuesta>>;
-      try {
-        await trx.insertInto('propuestas_agente').values(filaPropuesta(null, [])).execute();
-        revision = await revisarPropuesta(trx, { trx, seguridad: ctx, agenteCodigo: p.agenteCodigo, fecha: p.fecha, propuestaId }, herramienta, entrada.data);
-      } finally {
-        await sql`ROLLBACK TO SAVEPOINT propuesta_borrador`.execute(trx);
-        await sql`RELEASE SAVEPOINT propuesta_borrador`.execute(trx);
-      }
+      // El Contralor revisa; el ensayo usa una propuesta borrador (como en la aprobación) que se descarta.
+      const revision = await revisarPropuesta(
+        trx,
+        { trx, seguridad: ctx, agenteCodigo: p.agenteCodigo, fecha: p.fecha, propuestaId },
+        herramienta,
+        entrada.data,
+        async () => {
+          await trx.insertInto('propuestas_agente').values(filaPropuesta(null, [])).execute();
+        },
+      );
       const registrarRevision = (idPropuesta: string | null) =>
         trx
           .insertInto('revisiones_contralor')
@@ -323,7 +324,8 @@ export async function resolverPropuesta(
       herramienta.ejecutar({ trx, seguridad: ctx, agenteCodigo: propuesta.agente_codigo, fecha: hoy(), propuestaId }, entrada),
     );
     if (!resultado.ok) {
-      await marcar('FALLIDA', { error: resultado.error.codigo }, resultado.error.message);
+      // El error queda en el resultado; el motivo de la persona que aprobó se conserva.
+      await marcar('FALLIDA', { error: resultado.error.codigo, mensaje: resultado.error.message }, motivo);
       return { estado: 'FALLIDA', resultado: { error: resultado.error.message } };
     }
     await marcar('EJECUTADA', resultado.valor, motivo);

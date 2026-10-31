@@ -58,6 +58,35 @@ describe('Contralor: control de cifras de las respuestas', () => {
     expect(cifrasSinRespaldo('Registré los $81.000 que indicó.', ['La apertura es de $81.000'])).toEqual([]);
   });
 
+  it('identificadores, marcas de tiempo y el signo no sirven de respaldo', () => {
+    const datos = [{ id: '0f9a550e-8400-4e29-b1d4-446655440000', creado_en: '2026-10-23T14:05:59.000Z', resultado: '-5000000.00', folio: 4321 }];
+    expect(cifrasSinRespaldo('Hay $8.400 y un margen de 23%; el folio es 4321.', datos)).toEqual(['$8.400', '23%']);
+    expect(cifrasSinRespaldo('$446.655.440.000', datos)).toEqual(['$446.655.440.000']);
+    // Una pérdida informada como utilidad se marca; dicha como pérdida, no.
+    expect(cifrasSinRespaldo('La utilidad del ejercicio es $5.000.000.', datos)).toEqual(['$5.000.000']);
+    expect(cifrasSinRespaldo('El ejercicio tiene una pérdida de $5.000.000.', datos)).toEqual([]);
+    expect(cifrasSinRespaldo('Resultado: -$5.000.000.', datos)).toEqual([]);
+  });
+
+  it('entiende millones, MM$, decimales con punto en porcentajes y miles con coma', () => {
+    const datos = [{ saldo: 2_876_000, tasa: 12.5, total: 1_234_567 }];
+    expect(cifrasSinRespaldo('Unos $2,9 millones, tasa 12.5% y total $1,234,567.', datos)).toEqual([]);
+    expect(cifrasSinRespaldo('MM$ 2,9 en caja.', datos)).toEqual([]);
+    // Redondear a una sola cifra significativa ya no es decir el dato.
+    expect(cifrasSinRespaldo('Unos $3 millones.', datos)).toEqual(['$3 millones']);
+    expect(cifrasSinRespaldo('Tasa de 13.75%.', datos)).toEqual(['13.75%']);
+    // Las cuentas se reconocen por su forma o por la palabra "cuenta".
+    expect(cifrasSinRespaldo('Use la cuenta 4.1 o la 1.1.02.', datos)).toEqual([]);
+  });
+
+  it('el control es rápido con resultados grandes', () => {
+    const datos = Array.from({ length: 50 }, (_x, i) => ({ filas: Array.from({ length: 2000 }, (_y, j) => ({ monto: i * 100_000 + j * 7, saldo: j * 13 })) }));
+    const texto = Array.from({ length: 40 }, (_x, i) => `$${(i * 123_457).toLocaleString('es-CL')}`).join(', ');
+    const inicio = Date.now();
+    cifrasSinRespaldo(texto, datos);
+    expect(Date.now() - inicio).toBeLessThan(500);
+  });
+
   it('en una conversación, la respuesta con una cifra sin respaldo lleva el aviso y queda en las trazas', async () => {
     let respuesta = 'Según el balance, la caja tiene $1.234.567.';
     const modelo: ModeloIA = {
@@ -151,6 +180,56 @@ describe('Contralor: revisión de propuestas', () => {
       /no se modifica/u,
     );
     await expect(e.owner.query(`DELETE FROM revisiones_contralor WHERE propuesta_id = $1`, [r.propuestaId])).rejects.toThrow(/no se modifican/u);
+  });
+
+  it('dos propuestas idénticas al mismo tiempo: solo una llega', async () => {
+    const entrada = traspaso(9_000, 'Depósito simultáneo de prueba de concurrencia');
+    const [a, b] = await Promise.all([proponer(entrada), proponer(entrada)]);
+    expect([a.estado, b.estado].sort()).toEqual(['DENEGADA', 'PROPUESTA_CREADA']);
+  });
+
+  it('si al aprobar falla, se conserva el motivo de quien aprobó y el error queda en el resultado', async () => {
+    const r = await proponer(traspaso(11_000, 'Depósito que fallará al aprobarse'));
+    if (r.estado !== 'PROPUESTA_CREADA') throw new Error(r.estado);
+    // Entre la propuesta y la aprobación, la cuenta deja de ser imputable.
+    await e.owner.query(`UPDATE plan_cuentas SET imputable = false WHERE empresa_id = $1 AND codigo = '1.1.02'`, [e.empresaA1]);
+    const res = await resolverPropuesta(e.db, registro, { usuarioId: e.usuarios.contadorA1.id, empresaId: e.empresaA1 }, r.propuestaId, 'APROBAR', 'Revisado con la cartola');
+    await e.owner.query(`UPDATE plan_cuentas SET imputable = true WHERE empresa_id = $1 AND codigo = '1.1.02'`, [e.empresaA1]);
+    expect(res.estado).toBe('FALLIDA');
+    const { rows } = await e.owner.query(`SELECT motivo, resultado->>'error' AS error FROM propuestas_agente WHERE id = $1`, [r.propuestaId]);
+    expect(rows[0].motivo).toBe('Revisado con la cartola');
+    expect(rows[0].error).toBeTruthy();
+  });
+
+  it('si a quien pidió le falta un permiso de la acción, el ensayo deja una observación (no un rechazo)', async () => {
+    const { RegistroAgentes: Registro } = await import('../src/agentes/catalogo.js');
+    const { sinPermiso } = await import('../src/errores.js');
+    const { z } = await import('zod');
+    const propia = new Registro(
+      [
+        {
+          nombre: 'accion_con_otro_permiso',
+          descripcion: 'Prueba',
+          modulo: null,
+          permiso: 'agentes.consultar',
+          autonomia: 'PROPONER',
+          entrada: z.object({ x: z.number() }),
+          async ejecutar() {
+            throw sinPermiso('contabilidad.asientos.registrar');
+          },
+        },
+      ],
+      [{ codigo: 'AGENTE_PRUEBA', cargo: 'Prueba', descripcion: 'Prueba', instrucciones: 'x', herramientas: ['accion_con_otro_permiso'] }],
+    );
+    const r = await ejecutarHerramienta(e.db, propia, {
+      agenteCodigo: 'AGENTE_PRUEBA',
+      solicitante: { usuarioId: e.usuarios.contadorA1.id, empresaId: e.empresaA1 },
+      nombre: 'accion_con_otro_permiso',
+      entrada: { x: 1 },
+      fecha: HOY,
+    });
+    expect(r).toMatchObject({ estado: 'PROPUESTA_CREADA', dictamenContralor: 'OBSERVADA' });
+    if (r.estado === 'PROPUESTA_CREADA') expect(r.hallazgos.map((h) => h.codigo)).toEqual(['REQUIERE_APROBADOR_CON_PERMISO']);
   });
 
   it('el umbral de revisión se configura por empresa y agente', async () => {

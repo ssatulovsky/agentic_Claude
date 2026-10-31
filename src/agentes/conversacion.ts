@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 import { enContexto, type Db } from '../db/conexion.js';
 import type { RegistroAgentes } from './catalogo.js';
-import { ejecutarHerramienta, registrarTraza, type Solicitante } from './ejecutor.js';
+import { ejecutarHerramienta, hoy, registrarTraza, type Solicitante } from './ejecutor.js';
 import { avisoCifras, cifrasSinRespaldo } from './contralor.js';
 import type { MensajeConversacion, ModeloIA } from './tipos.js';
 
@@ -40,7 +40,7 @@ export async function conversar(
     throw new Error(`Agente desconocido: ${opciones.agenteCodigo}`);
   }
   const conversacionId = opciones.conversacionId ?? randomUUID();
-  const fecha = opciones.fecha ?? new Date().toISOString().slice(0, 10);
+  const fecha = opciones.fecha ?? hoy();
   const maxPasos = opciones.maxPasos ?? 8;
   const mensajes: MensajeConversacion[] = [...(opciones.historial ?? []), { rol: 'usuario', texto: opciones.mensaje }];
   const especificaciones = registro.especificaciones(agente.codigo);
@@ -76,7 +76,11 @@ export async function conversar(
       // (No cuentan como fuente las respuestas anteriores del agente ni lo que él mismo puso en las herramientas.)
       const fuentes = [
         ...(opciones.fuentesPrevias ?? []),
-        ...mensajes.flatMap((m): unknown[] => (m.rol === 'herramienta' ? [m.resultado] : m.rol === 'usuario' ? [m.texto] : [])),
+        // Solo los datos de herramientas ejecutadas: un resumen de propuesta o un mensaje de
+        // denegación repiten lo que puso el propio agente.
+        ...mensajes.flatMap((m): unknown[] =>
+          m.rol === 'herramienta' ? (m.resultado.estado === 'EJECUTADA' ? [m.resultado.resultado] : []) : m.rol === 'usuario' ? [m.texto] : [],
+        ),
       ];
       const sinRespaldo = cifrasSinRespaldo(respuesta.texto, fuentes);
       const texto = sinRespaldo.length > 0 ? respuesta.texto + avisoCifras(sinRespaldo) : respuesta.texto;

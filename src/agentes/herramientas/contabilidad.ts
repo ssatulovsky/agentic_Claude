@@ -102,7 +102,8 @@ export const proponerAsiento: DefinicionHerramienta<z.infer<typeof entradaAsient
       .where('agente_codigo', '=', agenteCodigo)
       .executeTakeFirst();
     const umbralConfig = Number((config?.parametros as { umbral_observacion_asiento?: unknown } | undefined)?.umbral_observacion_asiento);
-    const umbral = Number.isFinite(umbralConfig) && umbralConfig > 0 ? umbralConfig : UMBRAL_OBSERVACION_ASIENTO;
+    // Umbral configurado: entero de al menos $1 y bajo el máximo de un asiento; si no, el de omisión.
+    const umbral = Number.isInteger(umbralConfig) && umbralConfig >= 1 && umbralConfig <= 999_999_999_999 ? umbralConfig : UMBRAL_OBSERVACION_ASIENTO;
     if (total >= aCentavos(umbral)) {
       hallazgos.push({
         nivel: 'OBSERVACION',

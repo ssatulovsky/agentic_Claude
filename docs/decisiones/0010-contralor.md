@@ -12,14 +12,17 @@ real ocurría recién al aprobarse.
 1. **Determinista, no un modelo de IA.** El Contralor es código del núcleo. Un modelo puede
    explicar sus hallazgos (agente `CONTRALOR`), pero no decide.
 2. **Ensayo antes de proponer.** Cada propuesta se ejecuta dentro de un punto de restauración,
-   como la ejecutaría la persona al aprobarla (actor USUARIO, con una propuesta borrador del
-   mismo id), y se deshace siempre: asientos, correlativos, bitácora e identidad declarada
+   como se ejecutará al aprobarla (actor USUARIO, con una propuesta borrador del mismo id, que
+   se crea al final, dentro del ensayo), y se deshace siempre: asientos, correlativos, bitácora e identidad declarada
    vuelven atrás. Así se detecta antes lo que fallaría al aprobar: cuentas inexistentes o no
    imputables, períodos cerrados, terceros faltantes, RCV no importado, conciliaciones que no
-   cuadran. Una herramienta con efectos fuera de la base (enviar un DTE) se marca
+   cuadran. El ensayo corre con los permisos de quien pidió: si le falta uno que sí tendrá
+   quien apruebe, queda una observación ("debe aprobarla alguien con todos los permisos"), no
+   un rechazo. Una herramienta con efectos fuera de la base (enviar un DTE) se marca
    `ensayable: false` y no se ensaya.
 3. **Dictamen.**
-   - `RECHAZADA` (algún hallazgo bloqueante, o una propuesta idéntica ya pendiente): la
+   - `RECHAZADA` (algún hallazgo bloqueante, o una propuesta idéntica ya pendiente de
+     cualquier persona; dos pedidos idénticos simultáneos se serializan con un bloqueo): la
      propuesta no llega a nadie; el agente recibe los hallazgos para corregir o preguntar.
    - `OBSERVADA` (solo observaciones): llega a la persona, y aprobarla exige un motivo
      (también lo exige la base de datos).
@@ -32,10 +35,13 @@ real ocurría recién al aprobarse.
    rechazadas, que no llegan a ser propuesta), y el dictamen de una propuesta no se puede
    cambiar después.
 6. **Control de cifras.** Al terminar cada respuesta, toda cifra (montos, porcentajes, números
-   con miles o decimales; no fechas, RUT, códigos de cuenta ni años) debe estar en los datos
-   que entregaron las herramientas en esa conversación o en lo que dijo la persona. Las
-   respuestas anteriores del agente y lo que él mismo puso en las herramientas no cuentan
-   como fuente. Si una cifra no tiene respaldo, la respuesta lleva un aviso del Contralor y
+   con miles o decimales, "$2,9 millones", "MM$"; no fechas, RUT, códigos de cuenta ni años)
+   debe estar en los datos que entregaron las herramientas ejecutadas en esa conversación o
+   en lo que dijo la persona. No cuentan como fuente: las respuestas anteriores del agente, lo
+   que él mismo puso en las herramientas (resúmenes de propuestas, denegaciones), ni
+   identificadores o marcas de tiempo de los datos. El signo importa: una pérdida informada
+   como utilidad se marca. Una cifra redondeada a dos cifras significativas ("$2,9 millones")
+   se respalda con el dato que redondea a ella. Si una cifra no tiene respaldo, la respuesta lleva un aviso del Contralor y
    queda en las trazas (`CONTROL_CIFRAS`). Un total calculado por el modelo se marca: los
    cálculos los hacen las herramientas.
 7. **Pantalla de propuestas.** La web muestra las propuestas con el dictamen y los hallazgos,

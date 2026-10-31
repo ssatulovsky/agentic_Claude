@@ -62,6 +62,17 @@ CREATE POLICY revisiones_contralor_ver ON revisiones_contralor FOR SELECT TO erp
 CREATE POLICY revisiones_contralor_crear ON revisiones_contralor FOR INSERT TO erp_app
   WITH CHECK (app_fila_visible(empresa_id) AND solicitado_por = app_usuario_id());
 
+-- Propuestas idénticas pendientes en la empresa, de cualquier persona (la política de lectura
+-- oculta las de otros a quien no aprueba): solo devuelve cuántas.
+CREATE FUNCTION contralor_propuestas_identicas(p_empresa uuid, p_herramienta text, p_entrada jsonb) RETURNS int
+LANGUAGE sql STABLE SECURITY DEFINER SET search_path = public, pg_temp AS $$
+  SELECT count(*)::int FROM propuestas_agente
+  WHERE empresa_id = p_empresa AND herramienta = p_herramienta AND estado = 'PENDIENTE' AND entrada = p_entrada
+    AND app_tiene_acceso_empresa(p_empresa)
+$$;
+REVOKE EXECUTE ON FUNCTION contralor_propuestas_identicas(uuid, text, jsonb) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION contralor_propuestas_identicas(uuid, text, jsonb) TO erp_app;
+
 -- Nuevos tipos de traza: revisión del Contralor y control de cifras de la respuesta.
 ALTER TABLE trazas_agente DROP CONSTRAINT trazas_agente_tipo_check;
 ALTER TABLE trazas_agente ADD CONSTRAINT trazas_agente_tipo_check CHECK (tipo IN (
